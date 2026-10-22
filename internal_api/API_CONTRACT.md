@@ -47,8 +47,9 @@ The response additionally contains:
 }
 ```
 
-The existing food-contamination fields remain unchanged inside the legacy
-response payload:
+The prediction carries the existing preparation signal. `has_food_scraps` is
+true only for visible food residue or leftover food. Older responses may
+contain only the snake-case field; clients should accept both aliases:
 
 ```json
 {
@@ -57,7 +58,8 @@ response payload:
     "hasFoodScraps": false
   },
   "disposal": {
-    "hasFoodScraps": false
+    "hasFoodScraps": false,
+    "has_food_scraps": false
   }
 }
 ```
@@ -65,11 +67,10 @@ response payload:
 ## Preparation response
 
 For ICT-001, `preparation` is returned for every classification response. It
-is required only when the model's existing `has_food_scraps` signal is true,
-the category is explicitly enabled by the location configuration, and the
-container mapping is confirmed. The signal is intentionally neutral: the
-current Qwen contract combines food residue, remaining liquid, grease, and
-other contamination, so the UI must not claim to distinguish those cases.
+is required when `has_food_scraps` is true, the category is explicitly enabled
+by the location configuration, and the container mapping is confirmed. The UI
+uses the short food-preparation label and does not display the backend's
+longer system guidance text.
 
 Confirmed preparation example for a glass container:
 

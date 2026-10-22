@@ -1,14 +1,36 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { getTTState, RESULT_RESET_SECONDS, setTTState, TT_STATES } from '@/lib/ttState';
+import {
+  getTTState,
+  isValidScanPhaseTransition,
+  RESULT_RESET_SECONDS,
+  SCAN_PHASES,
+  setTTState,
+  TT_STATES,
+} from '@/lib/ttState';
 import { WASTE_TYPE, normalizeClassificationResponse } from '@/lib/wasteClassification';
+import { PREDICT_TIMEOUT_MS, requestPrediction } from '@/lib/predictRequest';
+import { attachCameraVideo, getLiveCameraStream, hasLiveVideoTrack } from '@/lib/cameraLifecycle';
 import { mockWasteResults } from '@/data/mockData';
 import WasteResult from '@/components/WasteResult';
 
 // Use the live classification service by default. Mock results are available
 // only when explicitly enabled for a local demo.
 const USE_MOCK_CLASSIFICATION = process.env.NEXT_PUBLIC_USE_MOCK_CLASSIFICATION === 'true';
+const SCAN_RESET_SECONDS = 15;
+const CAPTURE_START_DELAY_MS = 1_000;
+const CAPTURE_RETRY_DELAY_MS = 250;
+const ERROR_RESET_DELAY_MS = 2_500;
+
+const DEV_LOGGED_SCAN_TRANSITIONS = new Set([
+  `${SCAN_PHASES.SCANNING}->${SCAN_PHASES.CAPTURING}`,
+  `${SCAN_PHASES.CAPTURING}->${SCAN_PHASES.ANALYZING}`,
+  `${SCAN_PHASES.ANALYZING}->${SCAN_PHASES.RESULT}`,
+  `${SCAN_PHASES.ANALYZING}->${SCAN_PHASES.ERROR}`,
+  `${SCAN_PHASES.RESULT}->${SCAN_PHASES.SCANNING}`,
+  `${SCAN_PHASES.ERROR}->${SCAN_PHASES.SCANNING}`,
+]);
 
 function drawScaledFromVideo(video, canvas) {
   const vw = video.videoWidth || 640;
@@ -76,22 +98,33 @@ export default function Page() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const scanningRef = useRef(false);
-  const abortRef = useRef(null);
-  const lastFrameHashRef = useRef(null);
-  const lastScanAtRef = useRef(0);
+  const activeScanRef = useRef(null);
+  const scanOperationIdRef = useRef(0);
+  const scanPhaseRef = useRef(SCAN_PHASES.SCANNING);
+  const mountedRef = useRef(false);
+  const autoResetTimerRef = useRef(null);
+  const cameraRetryTimerRef = useRef(null);
+  const cameraInitRetryTimerRef = useRef(null);
+  const cameraRetryAttemptRef = useRef(0);
+  const cameraRetryAtRef = useRef(0);
+  const cameraErrorShownRef = useRef(false);
+  const cameraInitInFlightRef = useRef(null);
+  const cameraStartRef = useRef(null);
+  const globalStreamRef = useRef(null);
   const emptyFrameCountRef = useRef(0);
-  const retryCountRef = useRef(0);
   const mockResultIndexRef = useRef(0);
 
   const [status, setStatus] = useState('กำลังเปิดกล้อง…');
   const [previewImage, setPreviewImage] = useState(null);
   const [subStatus, setSubStatus] = useState('');
-  const [error, setError] = useState(null);
+  const [cameraStatus, setCameraStatus] = useState('initializing');
   const [ttState, setTTStateLocal] = useState(TT_STATES.IDLE);
   const [resultData, setResultData] = useState(null);
   const [countdown, setCountdown] = useState(15);
   const [currentResultIndex, setCurrentResultIndex] = useState(0);
   const [errorOverlay, setErrorOverlay] = useState(null);
+  const [scanPhase, setScanPhase] = useState(SCAN_PHASES.SCANNING);
+  const [scanCycle, setScanCycle] = useState(0);
   const currentResultIndexRef = useRef(0);
   
   // Touchless Kiosk Mode Stream
@@ -99,48 +132,183 @@ export default function Page() {
   const idleVideoRef = useRef(null);
   const lastIdleFrameRef = useRef(null);
 
+  function logCamera(message, details = undefined) {
+    if (process.env.NODE_ENV === 'development') {
+      console.debug(`[Camera] ${message}`, details || '');
+    }
+  }
+
+  function scheduleCameraRetry() {
+    if (!mountedRef.current || cameraInitRetryTimerRef.current !== null) return;
+    const delayMs = Math.min(15_000, 1_000 * (2 ** cameraRetryAttemptRef.current));
+    cameraRetryAttemptRef.current += 1;
+    cameraRetryAtRef.current = Date.now() + delayMs;
+    cameraInitRetryTimerRef.current = setTimeout(() => {
+      cameraInitRetryTimerRef.current = null;
+      cameraStartRef.current?.();
+    }, delayMs);
+  }
+
+  function clearCameraError() {
+    if (cameraErrorShownRef.current) setErrorOverlay(null);
+    cameraErrorShownRef.current = false;
+  }
+
+  function transitionScanPhase(nextPhase, logFrom = null) {
+    const previousPhase = scanPhaseRef.current;
+    if (previousPhase === nextPhase) return;
+    if (!isValidScanPhaseTransition(previousPhase, nextPhase)) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn(`[ScanState] ignored invalid transition ${previousPhase} → ${nextPhase}`);
+      }
+      return;
+    }
+
+    scanPhaseRef.current = nextPhase;
+    if (mountedRef.current) setScanPhase(nextPhase);
+
+    const transitionFrom = logFrom || previousPhase;
+    const transitionKey = `${transitionFrom}->${nextPhase}`;
+    if (process.env.NODE_ENV !== 'production' && DEV_LOGGED_SCAN_TRANSITIONS.has(transitionKey)) {
+      console.debug(`[ScanState] ${transitionFrom} → ${nextPhase}`);
+    }
+  }
+
+  function resetCaptureGuards() {
+    scanningRef.current = false;
+    emptyFrameCountRef.current = 0;
+    lastIdleFrameRef.current = null;
+  }
+
+  function cancelActiveScan() {
+    const activeScan = activeScanRef.current;
+    if (activeScan) {
+      activeScan.cancelled = true;
+      activeScan.controller.abort();
+      activeScanRef.current = null;
+    }
+    scanningRef.current = false;
+  }
+
+  function isActiveScan(activeScan) {
+    return mountedRef.current &&
+      activeScanRef.current === activeScan &&
+      !activeScan.cancelled;
+  }
+
+  function resetToScanning() {
+    if (!mountedRef.current) return;
+    logCamera('camera reset requested', { cycle: scanOperationIdRef.current });
+    if (activeScanRef.current?.requestStarted && !activeScanRef.current?.requestCompleted) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[Predict] reset before request completed', { cycle: activeScanRef.current.id });
+      }
+      return;
+    }
+
+    const previousPhase = scanPhaseRef.current;
+    transitionScanPhase(SCAN_PHASES.AUTO_RESET);
+    cancelActiveScan();
+
+    if (autoResetTimerRef.current !== null) {
+      clearTimeout(autoResetTimerRef.current);
+      autoResetTimerRef.current = null;
+    }
+    if (cameraRetryTimerRef.current !== null) {
+      clearTimeout(cameraRetryTimerRef.current);
+      cameraRetryTimerRef.current = null;
+    }
+
+    resetCaptureGuards();
+    setPreviewImage(null);
+    setResultData(null);
+    setErrorOverlay(null);
+    setSubStatus('');
+    setStatus('กำลังเตรียมภาพ…');
+    setCountdown(SCAN_RESET_SECONDS);
+    setScanCycle((previousCycle) => previousCycle + 1);
+    setTTState(TT_STATES.SCAN);
+    setTTStateLocal(TT_STATES.SCAN);
+    transitionScanPhase(
+      SCAN_PHASES.SCANNING,
+      previousPhase === SCAN_PHASES.RESULT || previousPhase === SCAN_PHASES.ERROR
+        ? previousPhase
+        : null,
+    );
+  }
+
+  function scheduleAutoReset(delay = ERROR_RESET_DELAY_MS) {
+    if (autoResetTimerRef.current !== null) {
+      clearTimeout(autoResetTimerRef.current);
+    }
+    autoResetTimerRef.current = setTimeout(() => {
+      autoResetTimerRef.current = null;
+      resetToScanning();
+    }, delay);
+  }
+
   // RESET/CLEAR state when ttState changes to IDLE or SCAN
   useEffect(() => {
     if (ttState === TT_STATES.IDLE) {
       // reset ทุกอย่างให้พร้อมเริ่มใหม่
+      cancelActiveScan();
+      resetCaptureGuards();
       setPreviewImage(null);
       setStatus('วางขยะลงหน้ากล้องเพื่อเริ่มสแกน');
       setSubStatus('');
-      setError(null);
       setErrorOverlay(null);
-      scanningRef.current = false;
-      lastFrameHashRef.current = null;
-      retryCountRef.current = 0;
+      transitionScanPhase(SCAN_PHASES.SCANNING);
     }
 
     if (ttState === TT_STATES.SCAN) {
       // เข้าสแกนใหม่ ต้องเป็น live camera เสมอ
       setPreviewImage(null);
       setSubStatus('');
-      setError(null);
       setErrorOverlay(null);
-      scanningRef.current = false;
+      if (!activeScanRef.current) {
+        resetCaptureGuards();
+        transitionScanPhase(SCAN_PHASES.SCANNING);
+      }
     }
   }, [ttState]);
 
   useEffect(() => {
-    setTTState(TT_STATES.IDLE);
-    setTTStateLocal(TT_STATES.IDLE);
+    mountedRef.current = true;
+    const persistedState = getTTState();
+    const initialState = persistedState === TT_STATES.SCAN
+      ? TT_STATES.SCAN
+      : TT_STATES.IDLE;
+    setTTState(initialState);
+    setTTStateLocal(initialState);
+    transitionScanPhase(SCAN_PHASES.SCANNING);
+
+    return () => {
+      mountedRef.current = false;
+      if (autoResetTimerRef.current !== null) {
+        clearTimeout(autoResetTimerRef.current);
+        autoResetTimerRef.current = null;
+      }
+      if (cameraRetryTimerRef.current !== null) {
+        clearTimeout(cameraRetryTimerRef.current);
+        cameraRetryTimerRef.current = null;
+      }
+      if (cameraInitRetryTimerRef.current !== null) {
+        clearTimeout(cameraInitRetryTimerRef.current);
+        cameraInitRetryTimerRef.current = null;
+      }
+      cancelActiveScan();
+      globalStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+    };
   }, []);
 
-  function showScanError(message) {
+  function showScanError(message, activeScan = null) {
+    if (activeScan && !isActiveScan(activeScan)) return;
+
+    transitionScanPhase(SCAN_PHASES.ERROR);
     setErrorOverlay(message);
     setStatus('วิเคราะห์ไม่สำเร็จ');
     setSubStatus('');
-    scanningRef.current = false;
-
-    setTimeout(() => {
-      if (getTTState() === TT_STATES.SCAN) {
-        setErrorOverlay(null);
-        setTTState(TT_STATES.IDLE);
-        setTTStateLocal(TT_STATES.IDLE);
-      }
-    }, 2500);
+    scheduleAutoReset(ERROR_RESET_DELAY_MS);
   }
 
   // Note: Removed 'Enter' key mapping for Kiosk auto-triggering
@@ -148,39 +316,98 @@ export default function Page() {
   // Global Camera Init (Always On)
   useEffect(() => {
     async function initGlobalCamera() {
-      try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      if (cameraInitInFlightRef.current) return cameraInitInFlightRef.current;
+      if (hasLiveVideoTrack(globalStreamRef.current)) {
+        logCamera('camera stream reused or reinitialized', { mode: 'reused' });
+        setCameraStatus('ready');
+        clearCameraError();
+        return globalStreamRef.current;
+      }
 
-        let videoConstraints = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } };
-        const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
-        
-        if (isMobile) {
-          videoConstraints.facingMode = { ideal: 'environment' };
-        } else {
-          const externalCam = videoDevices.find(d => !/facetime|integrated|built[- ]?in|macbook/i.test(d.label));
-          if (externalCam?.deviceId) videoConstraints.deviceId = { exact: externalCam.deviceId };
-          else {
-            const builtInCam = videoDevices.find(d => /facetime|built[- ]?in|macbook|integrated/i.test(d.label)) || videoDevices[0];
-            if (builtInCam?.deviceId) videoConstraints.deviceId = { exact: builtInCam.deviceId };
-            else videoConstraints.facingMode = { ideal: 'user' };
+      setCameraStatus('initializing');
+      setStatus('กำลังเปิดกล้อง…');
+      logCamera('camera initialization started');
+
+      const cameraRequest = (async () => {
+        try {
+          if (!navigator.mediaDevices?.getUserMedia) {
+            throw new Error('Camera API is unavailable');
           }
-        }
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoDevices = devices.filter(d => d.kind === 'videoinput');
 
-        const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
-        setGlobalStream(stream);
-      } catch (e) {
-        console.error('Camera init error', e);
-        setError('ไม่สามารถเปิดกล้องได้');
+          let videoConstraints = { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } };
+          const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
+          if (isMobile) {
+            videoConstraints.facingMode = { ideal: 'environment' };
+          } else {
+            const externalCam = videoDevices.find(d => !/facetime|integrated|built[- ]?in|macbook/i.test(d.label));
+            if (externalCam?.deviceId) videoConstraints.deviceId = { exact: externalCam.deviceId };
+            else {
+              const builtInCam = videoDevices.find(d => /facetime|built[- ]?in|macbook|integrated/i.test(d.label)) || videoDevices[0];
+              if (builtInCam?.deviceId) videoConstraints.deviceId = { exact: builtInCam.deviceId };
+              else videoConstraints.facingMode = { ideal: 'user' };
+            }
+          }
+
+          const stream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+          if (mountedRef.current) {
+            globalStreamRef.current = stream;
+            setGlobalStream(stream);
+            setCameraStatus('ready');
+            cameraRetryAttemptRef.current = 0;
+            cameraRetryAtRef.current = 0;
+            if (cameraInitRetryTimerRef.current !== null) {
+              clearTimeout(cameraInitRetryTimerRef.current);
+              cameraInitRetryTimerRef.current = null;
+            }
+            clearCameraError();
+            logCamera('camera stream ready', { tracks: stream.getVideoTracks().length });
+            logCamera('camera stream reused or reinitialized', { mode: 'reinitialized' });
+          } else {
+            stream.getTracks().forEach((track) => track.stop());
+          }
+          return stream;
+        } catch (e) {
+          logCamera('camera initialization failed', { name: e?.name || 'Error', message: e?.message });
+          if (mountedRef.current) {
+            setCameraStatus('error');
+            setStatus('ไม่สามารถเปิดกล้องได้');
+            setErrorOverlay('ไม่สามารถเปิดกล้องได้');
+            cameraErrorShownRef.current = true;
+            scheduleCameraRetry();
+          }
+          return null;
+        }
+      })();
+
+      cameraInitInFlightRef.current = cameraRequest;
+      try {
+        return await cameraRequest;
+      } finally {
+        if (cameraInitInFlightRef.current === cameraRequest) {
+          cameraInitInFlightRef.current = null;
+        }
       }
     }
+
+    cameraStartRef.current = initGlobalCamera;
     initGlobalCamera();
+
+    return () => {
+      if (cameraStartRef.current === initGlobalCamera) cameraStartRef.current = null;
+    };
   }, []);
 
   // Bind stream to invisible IDLE video for detection
   useEffect(() => {
     if (idleVideoRef.current && globalStream) {
-      idleVideoRef.current.srcObject = globalStream;
+      attachCameraVideo(idleVideoRef.current, globalStream).then((started) => {
+        if (started) logCamera('video playback started', { target: 'idle' });
+      }).catch((playError) => {
+        logCamera('camera initialization failed', { phase: 'idle playback', message: playError?.message });
+      });
     }
   }, [globalStream]);
 
@@ -227,12 +454,18 @@ export default function Page() {
     return () => clearInterval(interval);
   }, [ttState, globalStream]);
 
-  // Manage universal kiosk timeouts
+  // The visible countdown never controls an in-flight request. Its deadline
+  // starts only after the request reaches a terminal result or error.
   useEffect(() => {
-    if (ttState === TT_STATES.IDLE) return;
+    if (ttState === TT_STATES.IDLE) return undefined;
 
-    // Default timeouts: 15s for results, 20s for scan inactivity (e.g. error scan/abandon)
-    const limit = (ttState === TT_STATES.RESULT) ? RESULT_RESET_SECONDS : 20;
+    const isActiveScanPhase = ttState === TT_STATES.SCAN &&
+      (scanPhase === SCAN_PHASES.CAPTURING || scanPhase === SCAN_PHASES.ANALYZING);
+    const limit = ttState === TT_STATES.RESULT
+      ? RESULT_RESET_SECONDS
+      : isActiveScanPhase
+        ? Math.ceil(PREDICT_TIMEOUT_MS / 1000)
+        : SCAN_RESET_SECONDS;
     setCountdown(limit);
 
     // Reset pagination when entering RESULT state
@@ -241,17 +474,16 @@ export default function Page() {
       currentResultIndexRef.current = 0;
     }
 
+    const deadline = Date.now() + limit * 1000;
     const interval = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          setResultData(null);
-          setTTState(TT_STATES.IDLE);
-          setTTStateLocal(TT_STATES.IDLE);
-          return 0;
+      const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+      setCountdown(remaining);
+      if (remaining === 0) {
+        clearInterval(interval);
+        if (ttState === TT_STATES.RESULT) {
+          resetToScanning();
         }
-        return prev - 1;
-      });
+      }
     }, 1000);
 
     // Auto-rotate the result carousel every 4 seconds if there are multiple items
@@ -270,33 +502,32 @@ export default function Page() {
       clearInterval(interval);
       if (carouselInterval) clearInterval(carouselInterval);
     };
-  }, [ttState, resultData]);
+  }, [ttState, resultData, scanPhase]);
 
   async function captureAndScan() {
-    const now = Date.now();
-    if (now - lastScanAtRef.current < 5000) {
-      scanningRef.current = false;
-      return;
-    }
+    if (!mountedRef.current || getTTState() !== TT_STATES.SCAN ||
+        scanPhaseRef.current !== SCAN_PHASES.SCANNING || scanningRef.current || activeScanRef.current) return;
 
-    if (scanningRef.current) return;
     scanningRef.current = true;
-    abortRef.current?.abort();
-    abortRef.current = new AbortController();
-
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-
-    if (!video || !video.videoWidth) {
-      scanningRef.current = false;
-      return;
-    }
+    const controller = new AbortController();
+    const activeScan = {
+      id: scanOperationIdRef.current + 1,
+      controller,
+      requestStarted: false,
+      requestCompleted: false,
+      cancelled: false,
+    };
+    scanOperationIdRef.current = activeScan.id;
+    activeScanRef.current = activeScan;
+    transitionScanPhase(SCAN_PHASES.CAPTURING);
 
     const applyDetectionResult = (detectionResult) => {
+      if (!isActiveScan(activeScan)) return;
       const normalizedResult = normalizeClassificationResponse(detectionResult);
       if (normalizedResult?.status === 'api_error' || normalizedResult?.valid_prediction === false) {
-        showScanError('ระบบวิเคราะห์ขัดข้อง กรุณาลองใหม่อีกครั้ง');
-        return;
+        const apiError = new Error('Prediction failed');
+        apiError.responseStatus = 'api_error';
+        throw apiError;
       }
       if (!normalizedResult?.prediction?.wasteType) {
         throw new Error('ไม่พบประเภทขยะที่รองรับ');
@@ -316,11 +547,10 @@ export default function Page() {
           mappingVersion: normalizedResult.mapping_version,
         },
       );
-      retryCountRef.current = 0;
       setSubStatus('');
-      abortRef.current?.abort();
       sessionStorage.setItem('tt:last', JSON.stringify(normalizedResult));
       setResultData(normalizedResult);
+      transitionScanPhase(SCAN_PHASES.RESULT);
       setTTState(TT_STATES.RESULT);
       setTTStateLocal(TT_STATES.RESULT);
     };
@@ -349,122 +579,92 @@ export default function Page() {
       };
     };
 
-    setStatus('วางขยะลงได้เลย');
-    setSubStatus('');
-
-    // Reduced wait for MX Brio / external webcams
-    await new Promise(r => setTimeout(r, 1000));
-    
-    setSubStatus('กำลังบันทึกภาพ...');
-
-    // Capture multiple frames — pick sharpest using proper 3-channel Laplacian scoring
-    function frameSharpnessScore(ctx, w, h) {
-      const img = ctx.getImageData(0, 0, w, h).data;
-      let score = 0;
-      // Use a 2-pixel horizontal step, sample all 3 RGB channels
-      for (let i = 0; i < img.length - 4 * 2; i += 4) {
-        const rDiff = Math.abs(img[i]     - img[i + 8]); // R channel
-        const gDiff = Math.abs(img[i + 1] - img[i + 9]); // G channel
-        const bDiff = Math.abs(img[i + 2] - img[i + 10]);// B channel
-        score += rDiff + gDiff + bDiff;
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas || !video.videoWidth) {
+        const captureError = new Error('กล้องยังไม่พร้อม');
+        captureError.scanMessage = 'ไม่สามารถอ่านภาพจากกล้องได้';
+        throw captureError;
       }
-      return score;
-    }
 
-    let bestImage = null;
-    let bestScore = -1;
-    let brightnessFail = false;
+      setStatus('วางขยะลงได้เลย');
+      setSubStatus('');
 
-    // 5 frames with 200ms spacing for better sharpest-frame selection
-    for (let i = 0; i < 5; i++) {
+      setSubStatus('กำลังบันทึกภาพ...');
       drawScaledFromVideo(video, canvas);
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-      // Brightness gate — skip frames that are too dark or overexposed
       const { ok: brightOk, meanBrightness } = checkFrameBrightness(ctx, canvas.width, canvas.height);
       if (!brightOk) {
-        console.warn(`[SCAN] Frame ${i} brightness out of range (${meanBrightness}), skipping`);
-        brightnessFail = true;
-        await new Promise(r => setTimeout(r, 200));
-        continue;
+        console.warn(`[SCAN] Frame brightness out of range (${meanBrightness})`);
+        const brightnessError = new Error('ภาพมืดหรือสว่างเกินไป');
+        brightnessError.scanMessage = brightnessError.message;
+        throw brightnessError;
       }
-      brightnessFail = false;
+      const imageBase64 = canvas.toDataURL('image/jpeg', 0.88);
 
-      const score = frameSharpnessScore(ctx, canvas.width, canvas.height);
-      if (score > bestScore) {
-        bestScore = score;
-        bestImage = canvas.toDataURL('image/jpeg', 0.88);
+      setPreviewImage(imageBase64);
+      setSubStatus('จับภาพเรียบร้อย');
+
+      // Keep the existing frame-quality telemetry for the camera flow.
+      if (isFrameEmpty(ctx, canvas.width, canvas.height, 2.5)) {
+        console.warn('[SCAN] Frame quality is weak; sending it to the backend for validation.');
+        sessionStorage.setItem('tt:emptyHash', '1');
+      } else {
+        const emptyHash = simpleHash(
+          ctx.getImageData(0, 0, canvas.width, canvas.height).data.slice(0, 2000).toString()
+        );
+        sessionStorage.setItem('tt:emptyHash', String(emptyHash));
       }
-      await new Promise(r => setTimeout(r, 200));
-    }
 
-    // If all frames were too dark/bright, show an error instead of sending garbage.
-    if (!bestImage || brightnessFail) {
-      showScanError('ภาพมืดหรือสว่างเกินไป');
-      return;
-    }
-
-    const imageBase64 = bestImage;
-
-    setPreviewImage(imageBase64);
-    setSubStatus('จับภาพเรียบร้อย');
-
-    // Keep the existing frame-quality telemetry for the camera flow.
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (isFrameEmpty(ctx, canvas.width, canvas.height, 2.5)) {
-      console.warn('[SCAN] Frame quality is weak; sending it to the backend for validation.');
-      sessionStorage.setItem('tt:emptyHash', '1');
-    } else {
-      const emptyHash = simpleHash(
-        ctx.getImageData(0, 0, canvas.width, canvas.height).data.slice(0, 2000).toString()
-      );
-      sessionStorage.setItem('tt:emptyHash', String(emptyHash));
-    }
-
-    const frameHash = simpleHash(imageBase64.slice(0, 2000));
-
-    // allow up to 2 retries even if frame looks identical
-    if (lastFrameHashRef.current === frameHash && retryCountRef.current >= 2) {
-      scanningRef.current = false;
-      return;
-    }
-
-    if (lastFrameHashRef.current === frameHash) {
-      retryCountRef.current += 1;
-    } else {
-      retryCountRef.current = 0;
-    }
-
-    lastFrameHashRef.current = frameHash;
-    lastScanAtRef.current = Date.now();
-
-    try {
+      transitionScanPhase(SCAN_PHASES.ANALYZING);
       setStatus('กำลังวิเคราะห์ภาพ…');
 
       if (USE_MOCK_CLASSIFICATION) {
         setSubStatus('กำลังใช้ข้อมูลตัวอย่าง…');
         await new Promise(r => setTimeout(r, 500));
+        if (!isActiveScan(activeScan)) return;
         applyDetectionResult(getNextMockPrediction());
         return;
       }
 
       setSubStatus('กำลังเชื่อมต่อกับ FastAPI…');
 
-      const imageResponse = await fetch(imageBase64);
-      const imageBlob = await imageResponse.blob();
-      const formData = new FormData();
-      formData.append('file', imageBlob, 'capture.jpg');
-
-      const timeoutId = setTimeout(() => abortRef.current?.abort(), 120000);
-      const res = await fetch('/api/classify', {
-        method: 'POST',
-        body: formData,
-        signal: abortRef.current.signal,
+      const imageBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Image encoding failed')), 'image/jpeg', 0.88);
       });
-      clearTimeout(timeoutId);
+      if (!isActiveScan(activeScan)) return;
 
-      const parsed = await res.json();
-      console.log('[CLASSIFY RAW]', parsed);
+      let res;
+      let parsed;
+      activeScan.requestStarted = true;
+      const requestStartedAt = Date.now();
+      try {
+        ({ response: res, payload: parsed } = await requestPrediction({
+          imageBlob,
+          controller: activeScan.controller,
+          onStart: () => {
+            if (process.env.NODE_ENV !== 'production') console.debug('[Predict] POST /predict start', { cycle: activeScan.id });
+          },
+          onResponse: (statusCode, elapsedMs) => {
+            if (process.env.NODE_ENV !== 'production') {
+              console.debug('[Predict] response', { cycle: activeScan.id, status: statusCode, elapsedMs });
+            }
+          },
+        }));
+      } finally {
+        activeScan.requestCompleted = true;
+        if (process.env.NODE_ENV !== 'production') {
+          console.debug('[Predict] settled', {
+            cycle: activeScan.id,
+            elapsedMs: Date.now() - requestStartedAt,
+            resetBeforeCompletion: activeScan.cancelled && mountedRef.current,
+          });
+        }
+      }
+
+      if (!isActiveScan(activeScan)) return;
+      if (process.env.NODE_ENV !== 'production') console.debug('[CLASSIFY RAW]', parsed);
 
       if (!res.ok || parsed?.status === 'api_error') {
         const apiError = new Error(parsed?.detail || parsed?.error || `Prediction failed (${res.status})`);
@@ -483,46 +683,119 @@ export default function Page() {
           const parsedRaw = JSON.parse(normalized.raw);
           normalized = parsedRaw;
         }
-
       } catch (_) {}
 
       // The UI consumes the backend mapping fields through the shared
       // normalizer; no category-to-bin mapping is performed here.
       applyDetectionResult(normalized);
-
     } catch (e) {
-      if (e.name === 'AbortError') {
+      if (!isActiveScan(activeScan)) return;
+
+      if (e.name === 'TimeoutError') {
         console.warn('[SCAN] Detection timed out.');
-        showScanError('การวิเคราะห์ใช้เวลานานเกินไป');
+        showScanError('การวิเคราะห์ใช้เวลานานเกินไป', activeScan);
+      } else if (e.name === 'AbortError') {
+        showScanError('การวิเคราะห์ถูกยกเลิก กรุณาลองใหม่อีกครั้ง', activeScan);
       } else if (e.responseStatus === 'api_error') {
         console.error('backend API error', e);
-        showScanError('ระบบวิเคราะห์ขัดข้อง กรุณาลองใหม่อีกครั้ง');
+        showScanError('ระบบวิเคราะห์ขัดข้อง กรุณาลองใหม่อีกครั้ง', activeScan);
       } else {
         console.error('scan error', e);
-        showScanError('ไม่สามารถเชื่อมต่อระบบวิเคราะห์ได้');
+        showScanError(e.scanMessage || 'ไม่สามารถเชื่อมต่อระบบวิเคราะห์ได้', activeScan);
+      }
+    } finally {
+      if (activeScanRef.current === activeScan) {
+        activeScanRef.current = null;
+        scanningRef.current = false;
       }
     }
   }
 
   // SCAN State: Bind stream to visible UI and Auto-Capture
   useEffect(() => {
-    if (ttState !== TT_STATES.SCAN) return;
+    if (ttState !== TT_STATES.SCAN) return undefined;
 
-    if (videoRef.current && globalStream) {
-      videoRef.current.srcObject = globalStream;
-    }
+    let cancelled = false;
+    let retryTimer = null;
 
-    // Delay briefly to allow auto-exposure adjustments before capture
-    console.log('[Camera] Using auto focus/exposure with stabilization delay');
-    setStatus('กำลังเตรียมภาพ…');
-    const timer = setTimeout(() => {
-      if (!scanningRef.current && emptyFrameCountRef.current === 0) {
-        captureAndScan();
+    const retryUntilVideoReady = () => {
+      if (cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN) return;
+      const untilRetry = Math.max(0, cameraRetryAtRef.current - Date.now());
+      retryTimer = setTimeout(prepareCapture, Math.max(CAPTURE_RETRY_DELAY_MS, untilRetry));
+      cameraRetryTimerRef.current = retryTimer;
+    };
+
+    const prepareCapture = async () => {
+      if (cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN || scanningRef.current) return;
+
+      const video = videoRef.current;
+      if (!video) {
+        retryUntilVideoReady();
+        return;
       }
-    }, 1000); 
 
-    return () => clearTimeout(timer);
-  }, [ttState, globalStream]);
+      let stream = globalStreamRef.current || globalStream;
+      if (!hasLiveVideoTrack(stream)) {
+        setCameraStatus('initializing');
+        setStatus('กำลังเปิดกล้อง…');
+        const waitForRetry = cameraRetryAtRef.current - Date.now();
+        if (waitForRetry > 0) {
+          retryUntilVideoReady();
+          return;
+        }
+        try {
+          const initialized = await getLiveCameraStream(stream, async () => {
+            const nextStream = await cameraStartRef.current?.();
+            if (!nextStream) throw new Error('Camera initialization returned no stream');
+            return nextStream;
+          });
+          stream = initialized.stream;
+          globalStreamRef.current = stream;
+          if (initialized.reused) {
+            logCamera('camera stream reused or reinitialized', { mode: 'reused', cycle: scanCycle });
+          }
+        } catch {
+          retryUntilVideoReady();
+          return;
+        }
+      }
+
+      if (hasLiveVideoTrack(stream)) {
+        logCamera('camera stream reused or reinitialized', { mode: 'reused', cycle: scanCycle });
+      }
+      try {
+        if (await attachCameraVideo(video, stream)) {
+          logCamera('video playback started', { target: 'scan' });
+        }
+      } catch (playError) {
+        console.warn('[Camera] video.play() is not ready yet', playError);
+      }
+
+      if (
+        cancelled ||
+        !mountedRef.current ||
+        getTTState() !== TT_STATES.SCAN ||
+        !video.videoWidth ||
+        video.readyState < 2
+      ) {
+        retryUntilVideoReady();
+        return;
+      }
+
+      console.log('[Camera] Using auto focus/exposure with stabilization delay');
+      captureAndScan();
+    };
+
+    if (cameraStatus === 'ready') setStatus('กำลังเตรียมภาพ…');
+    retryTimer = setTimeout(prepareCapture, CAPTURE_START_DELAY_MS);
+    cameraRetryTimerRef.current = retryTimer;
+
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+      if (cameraRetryTimerRef.current === retryTimer) cameraRetryTimerRef.current = null;
+    };
+  }, [ttState, globalStream, scanCycle, cameraStatus]);
 
   return (
     <>
@@ -567,8 +840,7 @@ export default function Page() {
       )}
 
       {/* ── SCAN ── */}
-      {ttState === TT_STATES.SCAN && (
-        <div className="tt-page tt-scan-page">
+      <div className="tt-page tt-scan-page" style={{ display: ttState === TT_STATES.SCAN ? undefined : 'none' }}>
           <div className="tt-scan-wrap tt-scan-wrap--reference">
             <header className="tt-scan-heading">
               <h1>EcoAICle</h1>
@@ -578,12 +850,17 @@ export default function Page() {
 
             {/* The camera remains fully automatic; this frame is visual only. */}
             <div className={`tt-camera-frame tt-camera-frame--reference ${previewImage ? 'tt-camera-frame--captured' : ''}`}>
-              {!previewImage ? (
-                <video ref={videoRef} autoPlay playsInline muted
-                  style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
-              ) : (
+              <video ref={videoRef} autoPlay playsInline muted
+                style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+              {previewImage && (
                 <img src={previewImage} alt="Captured"
-                  style={{ width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+                  style={{ position:'absolute', inset:0, width:'100%', height:'100%', objectFit:'cover', display:'block' }} />
+              )}
+
+              {!previewImage && cameraStatus !== 'ready' && (
+                <div className="tt-camera-overlay-status" role="status" aria-live="polite">
+                  <p className="tt-camera-substatus">กำลังเปิดกล้อง…</p>
+                </div>
               )}
 
               {/* Scan line — animated sweep while waiting */}
@@ -610,7 +887,6 @@ export default function Page() {
             </div>
           </div>
         </div>
-      )}
 
       {/* ── RESULT ── */}
       {ttState === TT_STATES.RESULT && (() => {
@@ -692,8 +968,6 @@ export default function Page() {
         </div>
       )}
 
-      {/* Hidden canvas for image capture and analysis */}
-      <canvas ref={canvasRef} style={{ display: 'none' }} />
     </>
   );
 }

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --input-type=module -e \"await import('./src/lib/wasteClassification.test.js'); await import('./src/lib/reviewDashboard.test.js')\"",
+    "test": "node --test src/lib/*.test.js",
     "dev": "next dev --port 3000",
     "build": "next build",
     "start": "next start --port 3000"

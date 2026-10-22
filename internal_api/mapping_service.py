@@ -50,6 +50,7 @@ class PreparationDecision:
     container_disposal: Optional[dict[str, object]]
     steps: list[dict[str, object]]
     limitation_th: Optional[str]
+    has_food_scraps: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -59,6 +60,8 @@ class PreparationDecision:
             "signal": self.signal,
             "signal_value": self.signal_value,
             "guidance_mode": self.guidance_mode,
+            "has_food_scraps": self.has_food_scraps,
+            "hasFoodScraps": self.has_food_scraps,
             "shared_disposal_destination": self.shared_disposal_destination,
             "container_disposal": self.container_disposal,
             "steps": self.steps,
@@ -163,11 +166,13 @@ class MappingService:
         preparation = self.config.preparation
         version = preparation.get("version")
         signal = preparation.get("signal", "has_food_scraps")
+        preparation_required = has_food_scraps
         base_kwargs = {
             "version": version if isinstance(version, str) else None,
             "signal": signal if isinstance(signal, str) else "has_food_scraps",
-            "signal_value": has_food_scraps,
+            "signal_value": preparation_required,
             "guidance_mode": "combined_food_liquid_contamination",
+            "has_food_scraps": has_food_scraps,
         }
 
         if preparation.get("enabled") is not True:
@@ -181,7 +186,7 @@ class MappingService:
                 **base_kwargs,
             )
 
-        if not has_food_scraps:
+        if not preparation_required:
             return PreparationDecision(
                 required=False,
                 reason="signal_not_present",

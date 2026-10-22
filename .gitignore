@@ -90,3 +90,16 @@ build/
 *.log
 tmp/
 temp/
+
+# Frontend generated files
+Frontend/.next/
+Frontend/.next-dev/
+Frontend/node_modules/
+
+# Python environment
+internal_api/.venv/
+
+# Local configuration / secrets
+.env
+.env.local
+Frontend/.env.local

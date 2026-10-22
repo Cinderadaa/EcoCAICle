@@ -53,7 +53,7 @@ test('confirmed preparation uses an unnumbered shared point then the backend bin
   assert.equal(normalized.preparation.shared_disposal_destination.bin_number, null);
   assert.equal(normalized.preparation.steps[1].destination.bin_number, 3);
   assert.equal(normalized.preparation.steps[1].destination.bin_name, 'พลาสติก');
-  assert.match(normalized.preparation.limitation_th, /รวมเศษอาหาร ของเหลว/);
+  assert.match(normalized.preparation.limitation_th, /เทเศษอาหาร/);
 });
 
 test('glass preparation keeps bin five from the authoritative response', () => {

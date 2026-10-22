@@ -67,7 +67,7 @@ if load_dotenv is not None:
 
 
 API_URL = os.environ.get("QWEN_API_URL", "https://genai-local.boonrawd.co.th/litellm/v1")
-MODEL = os.environ.get("QWEN_MODEL", "qwen3.8:27b")
+MODEL = os.environ.get("QWEN_MODEL", "qwen3-vl:4b")
 PROMPT_VERSION = os.environ.get("ECOAICLE_PROMPT_VERSION") or None
 REVIEWER_TOKEN = os.environ.get("ECOAICLE_REVIEWER_TOKEN")
 API_KEY = os.environ.get("QWEN_API_KEY")
@@ -143,7 +143,7 @@ Waste classification rules:
 - If the object is bottle-shaped but the material evidence is insufficient or conflicting, choose unknown with a low confidence instead of guessing PET or glass.
 - Choose hazardous, infectious, or ewaste only when the evidence is clear; otherwise choose unknown.
 - If the material or waste category cannot be identified clearly, choose unknown.
-- Set has_food_scraps to true only when food residue, leftover food, liquid, grease, or contamination is clearly visible on or in the item. Do not infer food scraps merely because the item is food packaging.
+- Set has_food_scraps to true only when food residue or leftover food is clearly visible on or in the item. Do not infer food scraps merely because the item is food packaging.
 - Set confidence to a number from 0.0 to 1.0 representing confidence in the combined object identification and waste classification. Use a low value when the image is unclear.
 
 Keep the two decisions separate:
@@ -406,6 +406,8 @@ def _no_preparation(reason: str) -> dict[str, object]:
         "signal": "has_food_scraps",
         "signal_value": None,
         "guidance_mode": "combined_food_liquid_contamination",
+        "has_food_scraps": None,
+        "hasFoodScraps": None,
         "shared_disposal_destination": None,
         "container_disposal": None,
         "steps": [],

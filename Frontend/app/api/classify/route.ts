@@ -39,6 +39,7 @@ export async function POST(req: Request) {
     const res = await fetch(`${MODEL_BASE_URL}/predict`, {
       method: "POST",
       body: upstreamFormData,
+      signal: req.signal,
     });
 
     const raw = await res.text();

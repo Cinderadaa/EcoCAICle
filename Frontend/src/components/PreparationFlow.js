@@ -1,17 +1,18 @@
 import React from 'react';
 
 /**
- * Render only preparation metadata already approved and resolved by FastAPI.
- * The first destination is intentionally shown without a bin number; the
- * second destination is copied from the authoritative mapped container bin.
+ * Render the dedicated two-step food preparation screen.
+ * The destination values are still validated from the backend response, but
+ * this presentation intentionally does not render the standard result card.
  */
-export default function PreparationFlow({ preparation = null }) {
+export default function PreparationFlow({
+  preparation = null,
+}) {
   if (!preparation?.required || !Array.isArray(preparation.steps) || preparation.steps.length !== 2) {
     return null;
   }
 
   const firstStep = preparation.steps[0];
-  const secondStep = preparation.steps[1];
   const sharedDestination = preparation.shared_disposal_destination;
   const containerDestination = preparation.container_disposal;
 
@@ -30,29 +31,31 @@ export default function PreparationFlow({ preparation = null }) {
     return null;
   }
 
+  const firstAction = 'เทเศษอาหาร';
+
   return (
-    <section className="tt-disposal-guide" aria-label="ขั้นตอนการแยกก่อนทิ้ง">
-      <div className="tt-disposal-guide__steps">
-        <div className="tt-disposal-guide__step">
-          <span aria-hidden="true">1</span>
-          {firstStep?.icon && <img src={firstStep.icon} alt="" />}
-          <strong>{firstStep?.action_th || 'แยกเศษอาหารหรือของเหลวที่เหลือ'}</strong>
-          <p>{sharedDestination.label_th}</p>
-        </div>
-
-        <img className="tt-disposal-guide__arrow" src="/ลูกศร.png" alt="แล้วจึง" />
-
-        <div className="tt-disposal-guide__step">
-          <span aria-hidden="true">2</span>
-          {secondStep?.icon && <img src={secondStep.icon} alt="" />}
-          <strong>{secondStep?.action_th || 'ทิ้งภาชนะ'}</strong>
-          <p>
-            ลงถัง {containerDestination.bin_number} · {containerDestination.bin_name}
-          </p>
-        </div>
+    <section className="tt-food-flow__card" aria-label="ขั้นตอนการแยกก่อนทิ้ง">
+      <div className="tt-food-flow__step">
+        <span className="tt-food-flow__number" aria-hidden="true">1</span>
+        <strong>{firstAction}</strong>
+        <img src={firstStep?.icon || "/เทไอคอน.png"} alt="ไอคอนเทเศษอาหาร" />
       </div>
 
-      <p>{preparation.limitation_th}</p>
+      <img className="tt-food-flow__arrow" src="/ลูกศร.png" alt="แล้วจึง" />
+
+      <div className="tt-food-flow__step tt-food-flow__step--bin">
+        <span className="tt-food-flow__number" aria-hidden="true">2</span>
+        <div
+          className="analysis-screen__bin-number-wrap"
+          aria-label={`หมายเลขถัง ${containerDestination.bin_number}`}
+        >
+          <strong className="analysis-screen__bin-number">
+            {String(containerDestination.bin_number)}
+          </strong>
+        </div>
+        <strong>ทิ้งภาชนะลงถัง</strong>
+        <p>{containerDestination.bin_name}</p>
+      </div>
     </section>
   );
 }

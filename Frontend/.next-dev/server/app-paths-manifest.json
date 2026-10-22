@@ -1,7 +1,3 @@
 {
-  "/review/page": "app/review/page.js",
-  "/page": "app/page.js",
-  "/review/errors/page": "app/review/errors/page.js",
-  "/api/classify/route": "app/api/classify/route.js",
-  "/api/review/[...path]/route": "app/api/review/[...path]/route.js"
+  "/page": "app/page.js"
 }

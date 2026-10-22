@@ -151,7 +151,8 @@ export default function ResultPage() {
       setCountdown(0);
       setPhase('resetting');
       sessionStorage.removeItem('tt:last');
-      setTTState(TT_STATES.IDLE);
+      // Return to the kiosk scanner so the next capture starts automatically.
+      setTTState(TT_STATES.SCAN);
       window.location.href = '/';
     };
     const interval = setInterval(() => {
