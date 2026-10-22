@@ -1,0 +1,6 @@
+.venv
+__pycache__
+*.pyc
+request.json
+batch_test.py
+README.md

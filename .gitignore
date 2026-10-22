@@ -1,0 +1,92 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# =========================
+# Dataset
+# =========================
+dataset/
+datasets/
+data/
+raw_data/
+processed_data/
+
+# Images / generated samples
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# =========================
+# AI Model Weights
+# =========================
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Hugging Face / LoRA checkpoints
+checkpoint-*/
+checkpoints/
+outputs/
+runs/
+
+# =========================
+# Training outputs
+# =========================
+logs/
+wandb/
+tensorboard/
+results/
+training_output/
+
+# Generated reports / predictions
+predictions/
+error_analysis_output/
+benchmark_report/
+
+# =========================
+# Cache
+# =========================
+.cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+*.pem
+*.key
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+
+# =========================
+# Node / Frontend
+# =========================
+node_modules/
+.next/
+dist/
+build/
+
+# =========================
+# Docker / temp
+# =========================
+*.log
+tmp/
+temp/

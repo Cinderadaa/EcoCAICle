@@ -1,0 +1,349 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mockWasteResults } from '../data/mockData.js';
+import { createProxyApiErrorEnvelope } from './proxyError.js';
+import { getAuthoritativeBin } from './resultPresentation.js';
+import { getRemainingResultSeconds, shouldResetResult } from './resultFlow.js';
+import { normalizeClassificationResponse } from './wasteClassification.js';
+
+const expectedBins = new Map([
+  ['general', 1],
+  ['pet_bottle', 2],
+  ['plastic', 3],
+  ['paper', 4],
+  ['glass', 5],
+  ['metal', 6],
+  ['ewaste', 7],
+  ['fuel', 8],
+  ['hazardous', 9],
+  ['infectious', 10],
+]);
+
+test('authoritative ICT fixtures render all ten backend bin recommendations', () => {
+  const confirmedFixtures = mockWasteResults.filter((fixture) => fixture.status === 'success');
+  assert.equal(confirmedFixtures.length, 10);
+
+  for (const fixture of confirmedFixtures) {
+    const normalized = normalizeClassificationResponse(fixture);
+    const wasteCategory = fixture.prediction.waste_category;
+
+    assert.equal(normalized.status, 'success');
+    assert.equal(normalized.location_id, 'ICT-001');
+    assert.equal(normalized.mapping_version, 'ICT-10-bin-v2');
+    assert.equal(normalized.bin_number, expectedBins.get(wasteCategory));
+    assert.equal(normalized.mapping.binNumber, expectedBins.get(wasteCategory));
+    assert.equal(normalized.mapping.binCategory, fixture.bin_name);
+    assert.equal(normalized.prediction.has_food_scraps, fixture.prediction.has_food_scraps);
+    assert.equal(normalized.prediction.hasFoodScraps, fixture.prediction.hasFoodScraps);
+    assert.equal(normalized.disposal.hasFoodScraps, fixture.disposal.hasFoodScraps);
+  }
+});
+
+test('confirmed preparation uses an unnumbered shared point then the backend bin', () => {
+  const fixture = mockWasteResults.find((item) => item.request_id === 'mock-ict-b03');
+  const normalized = normalizeClassificationResponse(fixture);
+
+  assert.equal(normalized.status, 'success');
+  assert.equal(normalized.preparation.required, true);
+  assert.equal(
+    normalized.preparation.shared_disposal_destination.type,
+    'designated_disposal_point',
+  );
+  assert.equal(normalized.preparation.shared_disposal_destination.bin_id, null);
+  assert.equal(normalized.preparation.shared_disposal_destination.bin_number, null);
+  assert.equal(normalized.preparation.steps[1].destination.bin_number, 3);
+  assert.equal(normalized.preparation.steps[1].destination.bin_name, 'พลาสติก');
+  assert.match(normalized.preparation.limitation_th, /รวมเศษอาหาร ของเหลว/);
+});
+
+test('glass preparation keeps bin five from the authoritative response', () => {
+  const normalized = normalizeClassificationResponse({
+    request_id: 'prep-glass-1',
+    location_id: 'ICT-001',
+    prediction: {
+      waste_category: 'glass',
+      object_name_th: 'ขวดแก้ว',
+      has_food_scraps: true,
+      confidence: 0.9,
+    },
+    bin_id: 'ICT-001-B05',
+    bin_number: 5,
+    bin_name: 'ขวดแก้ว',
+    mapping_version: 'ICT-10-bin-v2',
+    classification_status: 'confirmed',
+    mapping_fallback: false,
+    status: 'success',
+    preparation: {
+      required: true,
+      reason: 'combined_food_liquid_signal',
+      version: 'ICT-preparation-v1',
+      signal: 'has_food_scraps',
+      signal_value: true,
+      guidance_mode: 'combined_food_liquid_contamination',
+      shared_disposal_destination: {
+        destination_id: 'ICT-001-FOOD-LIQUID-SEPARATION',
+        type: 'designated_disposal_point',
+        label_th: 'จุดแยกเศษอาหาร/ของเหลว',
+        bin_id: null,
+        bin_number: null,
+      },
+      steps: [
+        { step: 1, action_th: 'แยก', instruction_th: 'แยกก่อน', icon: '/เทไอคอน.png' },
+        { step: 2, action_th: 'ทิ้งภาชนะ', instruction_th: 'ทิ้ง', icon: '/Tang.png' },
+      ],
+      limitation_th: 'สัญญาณรวม',
+    },
+  });
+
+  assert.equal(normalized.preparation.required, true);
+  assert.equal(normalized.preparation.steps[1].destination.bin_number, 5);
+  assert.equal(normalized.preparation.steps[1].destination.bin_name, 'ขวดแก้ว');
+});
+
+test('unknown, low-confidence, missing mapping, and API error have no preparation flow', () => {
+  const unknown = normalizeClassificationResponse(mockWasteResults.find((item) => item.request_id === 'mock-ict-unknown'));
+  const low = normalizeClassificationResponse(mockWasteResults.find((item) => item.request_id === 'mock-ict-low-confidence'));
+  const missing = normalizeClassificationResponse({
+    request_id: 'prep-missing',
+    location_id: 'ALT-001',
+    prediction: { waste_category: 'glass', confidence: 0.9, has_food_scraps: true },
+    bin_id: null,
+    bin_number: null,
+    bin_name: null,
+    mapping_version: 'ALT-v1',
+    classification_status: 'unavailable',
+    mapping_fallback: false,
+    status: 'missing_mapping',
+    preparation: { required: true, steps: [] },
+  });
+  const apiError = normalizeClassificationResponse({
+    request_id: 'prep-error',
+    location_id: 'ICT-001',
+    classification_status: 'api_error',
+    mapping_fallback: false,
+    status: 'api_error',
+    preparation: { required: true, steps: [] },
+  });
+
+  assert.equal(unknown.preparation.required, false);
+  assert.equal(low.preparation.required, false);
+  assert.equal(missing.preparation.required, false);
+  assert.equal(apiError.preparation.required, false);
+});
+
+test('invalid preparation destination is suppressed instead of displaying a bin', () => {
+  const normalized = normalizeClassificationResponse({
+    request_id: 'prep-invalid',
+    location_id: 'ICT-001',
+    prediction: { waste_category: 'plastic', confidence: 0.9, has_food_scraps: true },
+    bin_id: 'ICT-001-B03',
+    bin_number: 3,
+    bin_name: 'พลาสติก',
+    mapping_version: 'ICT-10-bin-v2',
+    classification_status: 'confirmed',
+    mapping_fallback: false,
+    status: 'success',
+    preparation: {
+      required: true,
+      shared_disposal_destination: {
+        destination_id: 'bad',
+        type: 'designated_disposal_point',
+        label_th: 'ผิด',
+        bin_id: 'FAKE-BIN',
+        bin_number: 99,
+      },
+      steps: [],
+    },
+  });
+
+  assert.equal(normalized.preparation.required, false);
+  assert.equal(normalized.preparation.reason, 'invalid_preparation');
+});
+
+test('preparation metadata survives session-style normalization', () => {
+  const fixture = mockWasteResults.find((item) => item.request_id === 'mock-ict-b03');
+  const normalized = normalizeClassificationResponse(fixture);
+  const restored = normalizeClassificationResponse(normalized);
+
+  assert.equal(restored.preparation.required, true);
+  assert.equal(restored.preparation.steps[0].destination.bin_number, null);
+  assert.equal(restored.preparation.steps[1].destination.bin_number, 3);
+  assert.equal(restored.preparation.version, 'ICT-preparation-v1');
+});
+
+test('unknown response displays the backend-provided fallback', () => {
+  const normalized = normalizeClassificationResponse(mockWasteResults.find((fixture) => fixture.status === 'unknown' && fixture.classification_status === 'unknown'));
+
+  assert.equal(normalized.status, 'unknown');
+  assert.equal(normalized.classification_status, 'unknown');
+  assert.equal(normalized.bin_id, 'ICT-001-B01');
+  assert.equal(normalized.bin_number, 1);
+  assert.equal(normalized.mapping_fallback, true);
+  assert.equal(normalized.mapping.binCategory, 'ขยะทั่วไป (ขยะฝังกลบ)');
+});
+
+test('low-confidence response remains unknown and uses only the backend fallback', () => {
+  const normalized = normalizeClassificationResponse(mockWasteResults.find((fixture) => fixture.classification_status === 'low_confidence'));
+
+  assert.equal(normalized.status, 'unknown');
+  assert.equal(normalized.classification_status, 'low_confidence');
+  assert.equal(normalized.prediction.wasteType, 'unknown');
+  assert.equal(normalized.bin_number, 1);
+  assert.equal(normalized.mapping_fallback, true);
+});
+
+test('missing mapping never invents a frontend destination', () => {
+  const normalized = normalizeClassificationResponse({
+    request_id: 'missing-1',
+    location_id: 'ALT-001',
+    prediction: {
+      waste_category: 'organic',
+      object_name_th: 'เศษวัสดุ',
+      has_food_scraps: false,
+      confidence: 0.99,
+    },
+    bin_id: null,
+    bin_number: null,
+    bin_name: null,
+    mapping_version: 'ALT-v1',
+    classification_status: 'unavailable',
+    mapping_fallback: false,
+    status: 'missing_mapping',
+  });
+
+  assert.equal(normalized.status, 'missing_mapping');
+  assert.equal(normalized.classification_status, 'unavailable');
+  assert.equal(normalized.bin_id, null);
+  assert.equal(normalized.bin_number, null);
+  assert.equal(normalized.mapping.binNumber, null);
+  assert.equal(normalized.mapping.binCategory, null);
+});
+
+test('API error remains an API error and has no destination', () => {
+  const normalized = normalizeClassificationResponse({
+    request_id: 'error-1',
+    location_id: 'ICT-001',
+    mapping_version: 'ICT-10-bin-v2',
+    classification_status: 'api_error',
+    mapping_fallback: false,
+    status: 'api_error',
+    detail: { error: 'Model unavailable' },
+  });
+
+  assert.equal(normalized.status, 'api_error');
+  assert.equal(normalized.valid_prediction, false);
+  assert.equal(normalized.bin_number, null);
+  assert.equal(normalized.mapping.binNumber, null);
+});
+
+test('Next.js proxy errors use the structured api_error contract', () => {
+  const envelope = createProxyApiErrorEnvelope({
+    requestId: 'proxy-error-1',
+    locationId: 'ICT-001',
+    detail: {
+      error: 'model_unavailable',
+      type: 'FetchError',
+      message: 'Prediction service is unavailable.',
+    },
+  });
+
+  assert.deepEqual(envelope, {
+    request_id: 'proxy-error-1',
+    location_id: 'ICT-001',
+    object_name_th: null,
+    waste_category: null,
+    confidence: null,
+    bin_id: null,
+    bin_number: null,
+    bin_name: null,
+    mapping_version: null,
+    classification_status: 'api_error',
+    mapping_fallback: false,
+    status: 'api_error',
+    detail: {
+      error: 'model_unavailable',
+      type: 'FetchError',
+      message: 'Prediction service is unavailable.',
+    },
+  });
+});
+
+test('authoritative location-specific mapping overrides no frontend master data', () => {
+  const backendResponse = {
+    request_id: 'alt-1',
+    location_id: 'ALT-001',
+    prediction: {
+      waste_category: 'general',
+      object_name_th: 'ขยะทั่วไป',
+      has_food_scraps: false,
+      confidence: 0.99,
+    },
+    bin_id: 'ALT-001-B42',
+    bin_number: 42,
+    bin_name: 'ถังเฉพาะจุด ALT',
+    mapping_version: 'ALT-v2',
+    classification_status: 'confirmed',
+    mapping_fallback: false,
+    status: 'success',
+  };
+
+  const normalized = normalizeClassificationResponse(backendResponse);
+  assert.equal(normalized.location_id, 'ALT-001');
+  assert.equal(normalized.bin_id, 'ALT-001-B42');
+  assert.equal(normalized.bin_number, 42);
+  assert.equal(normalized.bin_name, 'ถังเฉพาะจุด ALT');
+  assert.equal(normalized.mapping.binNumber, 42);
+  assert.equal(normalized.mapping.binCategory, 'ถังเฉพาะจุด ALT');
+
+  // Session restore re-normalizes the same contract and must preserve it.
+  const restored = normalizeClassificationResponse(normalized);
+  assert.equal(restored.location_id, 'ALT-001');
+  assert.equal(restored.bin_number, 42);
+  assert.equal(restored.mapping.binCategory, 'ถังเฉพาะจุด ALT');
+});
+
+test('bin presentation uses backend number and name without category recalculation', () => {
+  const normalized = normalizeClassificationResponse({
+    request_id: 'render-1',
+    location_id: 'ALT-001',
+    prediction: { waste_category: 'general', object_name_th: 'ขยะ', confidence: 0.99 },
+    bin_id: 'ALT-001-B42',
+    bin_number: 42,
+    bin_name: 'ถังเฉพาะจุด ALT',
+    mapping_version: 'ALT-v1',
+    classification_status: 'confirmed',
+    mapping_fallback: false,
+    status: 'success',
+  });
+
+  assert.deepEqual(getAuthoritativeBin(normalized), {
+    number: 42,
+    category: 'ถังเฉพาะจุด ALT',
+  });
+});
+
+test('result countdown resets exactly at expiry', () => {
+  assert.equal(getRemainingResultSeconds(10_000, 9_001), 1);
+  assert.equal(getRemainingResultSeconds(10_000, 10_000), 0);
+  assert.equal(shouldResetResult(10_000, 9_999), false);
+  assert.equal(shouldResetResult(10_000, 10_000), true);
+});
+
+test('legacy backend responses remain supported only through the adapter', () => {
+  const normalized = normalizeClassificationResponse({
+    prediction: {
+      waste_category: 'cardboard',
+      object_name_th: 'กล่องกระดาษ',
+      has_food_scraps: false,
+      confidence: 0.9,
+    },
+  });
+
+  assert.equal(normalized.status, 'success');
+  assert.equal(normalized.prediction.wasteType, 'paper');
+  assert.equal(normalized.bin_id, null);
+  assert.equal(normalized.bin_number, 4);
+  assert.equal(normalized.mapping.binKey, 'paper');
+  assert.equal(normalized.mapping.binCategory, 'กระดาษ');
+  assert.equal(normalized.location_id, null);
+});
