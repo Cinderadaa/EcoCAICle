@@ -7,6 +7,7 @@ import urllib.error
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from fastapi import Request
 
 from internal_api import app as backend
 from internal_api.mapping_config import validate_location_config
@@ -31,12 +32,14 @@ def qwen_result(
     confidence: float = 1.0,
     object_name: str = "ทดสอบวัตถุ",
     has_food_scraps: bool = False,
+    has_liquid: bool = False,
 ) -> dict[str, object]:
     content = json.dumps(
         {
             "object_name_th": object_name,
             "waste_category": category,
             "has_food_scraps": has_food_scraps,
+            "has_liquid": has_liquid,
             "confidence": confidence,
         },
         ensure_ascii=False,
@@ -78,23 +81,23 @@ class PredictContractTests(unittest.TestCase):
             "to_thread",
             new=inline_to_thread,
         ):
-            return asyncio.run(backend.predict(FakeUploadFile()))
+            return asyncio.run(backend.predict(request=None, file=FakeUploadFile()))
 
     def test_all_ten_bins_return_extended_fields_and_legacy_fields(self) -> None:
         expected = {
-            "general": ("ICT-001-B01", 1),
-            "pet_bottle": ("ICT-001-B02", 2),
-            "plastic": ("ICT-001-B03", 3),
-            "paper": ("ICT-001-B04", 4),
-            "glass": ("ICT-001-B05", 5),
-            "metal": ("ICT-001-B06", 6),
-            "ewaste": ("ICT-001-B07", 7),
-            "fuel": ("ICT-001-B08", 8),
-            "hazardous": ("ICT-001-B09", 9),
-            "infectious": ("ICT-001-B10", 10),
+            "general": ("ICT-001-B01", 1, "ขยะทั่วไป (ขยะฝังกลบ)"),
+            "pet_bottle": ("ICT-001-B02", 2, "ขวดพลาสติก PET"),
+            "plastic": ("ICT-001-B03", 3, "พลาสติก"),
+            "paper": ("ICT-001-B04", 4, "กระดาษ"),
+            "glass": ("ICT-001-B05", 5, "ขวดแก้ว"),
+            "metal": ("ICT-001-B06", 6, "กระป๋องอะลูมิเนียมและโลหะอื่น ๆ"),
+            "ewaste": ("ICT-001-B07", 7, "ขยะอิเล็กทรอนิกส์"),
+            "fuel": ("ICT-001-B08", 8, "ขยะเชื้อเพลิง"),
+            "hazardous": ("ICT-001-B09", 9, "ขยะอันตราย"),
+            "infectious": ("ICT-001-B10", 10, "ขยะติดเชื้อ"),
         }
 
-        for category, (bin_id, bin_number) in expected.items():
+        for category, (bin_id, bin_number, bin_name) in expected.items():
             response = self.predict_with(qwen_result(category))
             self.assertIsInstance(response, dict)
             self.assertEqual(response["status"], "success")
@@ -103,10 +106,59 @@ class PredictContractTests(unittest.TestCase):
             self.assertEqual(response["bin_number"], bin_number)
             self.assertEqual(response["classification_status"], "confirmed")
             self.assertFalse(response["mapping_fallback"])
+            self.assertEqual(response["mappedBin"], {
+                "id": bin_id,
+                "number": bin_number,
+                "nameTh": bin_name,
+                "wasteType": category,
+                "mappingVersion": "ICT-10-bin-v2",
+                "fallback": False,
+            })
+            self.assertEqual(response["bin_name"], bin_name)
             self.assertTrue(response["request_id"])
             self.assertEqual(response["prediction"]["waste_category"], category)
             self.assertTrue(response["valid_prediction"])
             self.assertIn("disposal", response)
+
+    def test_consecutive_scans_keep_resolving_against_the_current_category(self) -> None:
+        original_config = backend.MAPPING_CONFIG
+        original_service = backend.MAPPING_SERVICE
+        scans = (
+            ("general", "โทรศัพท์มือถือพร้อมเคส", "ewaste", 7, "ขยะอิเล็กทรอนิกส์"),
+            ("paper", "กล่องกระดาษ", "paper", 4, "กระดาษ"),
+            ("glass", "ขวดแก้ว", "glass", 5, "ขวดแก้ว"),
+        )
+        request_ids = set()
+
+        for reset_cycle_id, (raw_category, item_name, normalized_type, number, bin_name) in enumerate(scans, start=1):
+            request = Request({
+                "type": "http",
+                "headers": [(b"x-reset-cycle-id", str(reset_cycle_id).encode("ascii"))],
+            })
+            with patch.object(backend, "_post_json", return_value=qwen_result(
+                raw_category,
+                object_name=item_name,
+            )), patch.object(backend.asyncio, "to_thread", new=inline_to_thread):
+                response = asyncio.run(backend.predict(
+                    request=request,
+                    file=FakeUploadFile(),
+                ))
+
+            self.assertNotIn(response["request_id"], request_ids)
+            request_ids.add(response["request_id"])
+            self.assertEqual(response["rawCategory"], raw_category)
+            self.assertEqual(response["normalizedWasteType"], normalized_type)
+            self.assertEqual(response["binNumber"], number)
+            self.assertEqual(response["binName"], bin_name)
+            self.assertFalse(response["mappingFallback"])
+            self.assertEqual(response["mappedBin"]["number"], number)
+            self.assertEqual(response["mappedBin"]["nameTh"], bin_name)
+            self.assertFalse(response["mappedBin"]["fallback"])
+
+            # Returning to Welcome clears only UI state; the process mapping
+            # objects remain the same for the next request.
+            self.assertIs(backend.MAPPING_CONFIG, original_config)
+            self.assertIs(backend.MAPPING_SERVICE, original_service)
             self.assertIn("model", response)
 
     def test_qwen_request_format_and_prompt_are_unchanged(self) -> None:
@@ -121,7 +173,7 @@ class PredictContractTests(unittest.TestCase):
             "to_thread",
             new=inline_to_thread,
         ):
-            response = asyncio.run(backend.predict(FakeUploadFile()))
+            response = asyncio.run(backend.predict(request=None, file=FakeUploadFile()))
 
         self.assertEqual(response["status"], "success")
         self.assertEqual(captured_payload["model"], backend.MODEL)
@@ -140,6 +192,7 @@ class PredictContractTests(unittest.TestCase):
         self.assertTrue(response["prediction"]["hasFoodScraps"])
         self.assertTrue(response["disposal"]["hasFoodScraps"])
         self.assertTrue(response["preparation"]["required"])
+        self.assertEqual(response["mappedBin"]["number"], 3)
         self.assertEqual(
             response["preparation"]["shared_disposal_destination"]["type"],
             "designated_disposal_point",
@@ -159,8 +212,9 @@ class PredictContractTests(unittest.TestCase):
 
     def test_remaining_liquid_signal_uses_the_same_destination_and_glass_bin(self) -> None:
         response = self.predict_with(
-            qwen_result("glass", has_food_scraps=True)
+            qwen_result("glass", has_liquid=True)
         )
+        self.assertTrue(response["prediction"]["hasLiquid"])
         self.assertEqual(response["bin_number"], 5)
         self.assertTrue(response["preparation"]["required"])
         self.assertEqual(
@@ -174,6 +228,30 @@ class PredictContractTests(unittest.TestCase):
             response["preparation"]["steps"][1]["destination"]["bin_number"],
             5,
         )
+        self.assertEqual(
+            response["preparation"]["container_disposal"]["bin_number"],
+            response["mappedBin"]["number"],
+        )
+
+    def test_valid_thai_item_name_returns_confirmed_mapped_bin(self) -> None:
+        response = self.predict_with(qwen_result("paper", object_name="กระดาษทิชชู่ใช้แล้ว"))
+        self.assertEqual(response["prediction"]["itemNameTh"], "กระดาษทิชชู่ใช้แล้ว")
+        self.assertEqual(response["classificationStatus"], "confirmed")
+        self.assertEqual(response["mappedBin"]["number"], 4)
+        self.assertEqual(response["mappedBin"]["nameTh"], "กระดาษ")
+
+    def test_mixed_language_item_name_uses_safe_thai_waste_label(self) -> None:
+        response = self.predict_with(qwen_result("glass", object_name="ขวดแก้ว中文 bottle"))
+        self.assertEqual(response["prediction"]["itemNameTh"], "ขวดแก้ว")
+
+    def test_model_bin_fields_cannot_override_central_mapping(self) -> None:
+        malicious = qwen_result("paper")
+        content = json.loads(malicious["choices"][0]["message"]["content"])
+        content.update({"bin_number": 99, "bin_name": "โมเดลกำหนดถัง", "bin_id": "FAKE"})
+        malicious["choices"][0]["message"]["content"] = json.dumps(content, ensure_ascii=False)
+        response = self.predict_with(malicious)
+        self.assertEqual(response["mappedBin"]["id"], "ICT-001-B04")
+        self.assertEqual(response["mappedBin"]["number"], 4)
 
     def test_unknown_and_low_confidence_never_emit_preparation(self) -> None:
         unknown = self.predict_with(qwen_result("unknown", confidence=0.2, has_food_scraps=True))
@@ -217,29 +295,74 @@ class PredictContractTests(unittest.TestCase):
         self.assertEqual(response["status"], "missing_mapping")
         self.assertFalse(response["preparation"]["required"])
 
-    def test_cardboard_remains_compatible_with_paper_mapping(self) -> None:
+    def test_noncanonical_categories_are_unknown_and_use_only_bin_one_fallback(self) -> None:
+        for category in ("other", "trash", "cardboard", "compost", "not-supported"):
+            with self.subTest(category=category):
+                response = self.predict_with(qwen_result(category))
+                self.assertEqual(response["prediction"]["wasteType"], "unknown")
+                self.assertEqual(response["classificationStatus"], "unknown")
+                self.assertEqual(response["mappedBin"]["number"], 1)
+                self.assertEqual(response["mappedBin"]["nameTh"], "ขยะทั่วไป (ขยะฝังกลบ)")
+                self.assertTrue(response["mappedBin"]["fallback"])
+
+    def test_phone_item_name_normalizes_to_ewaste_and_returns_bin_seven(self) -> None:
         response = self.predict_with(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "object_name_th": "กระดาษแข็ง",
-                                    "waste_category": "cardboard",
-                                    "has_food_scraps": False,
-                                    "confidence": 1.0,
-                                },
-                                ensure_ascii=False,
-                            )
-                        }
-                    }
-                ]
-            }
+            qwen_result(
+                "unknown",
+                confidence=0.99,
+                object_name="โทรศัพท์มือถือพร้อมเคส",
+            )
         )
-        self.assertEqual(response["status"], "success")
-        self.assertEqual(response["prediction"]["waste_category"], "paper")
-        self.assertEqual(response["bin_id"], "ICT-001-B04")
+
+        self.assertEqual(response["rawCategory"], "unknown")
+        self.assertEqual(response["normalizedWasteType"], "ewaste")
+        self.assertEqual(response["prediction"]["wasteType"], "ewaste")
+        self.assertEqual(response["mappedBin"]["number"], 7)
+        self.assertEqual(response["mappedBin"]["nameTh"], "ขยะอิเล็กทรอนิกส์")
+        self.assertFalse(response["mappingFallback"])
+        self.assertEqual(response["mappingDecision"]["classificationStatus"], "confirmed")
+
+    def test_thai_and_english_phone_names_normalize_to_ewaste(self) -> None:
+        for item_name in (
+            "โทรศัพท์มือถือ",
+            "มือถือพร้อมเคส",
+            "สมาร์ตโฟน",
+            "สมาร์ทโฟน",
+            "โทรศัพท์",
+            "mobile phone",
+            "smartphone",
+            "cell phone",
+        ):
+            with self.subTest(item_name=item_name):
+                response = self.predict_with(
+                    qwen_result("unknown", confidence=0.99, object_name=item_name)
+                )
+                self.assertEqual(response["prediction"]["wasteType"], "ewaste")
+                self.assertEqual(response["mappedBin"]["number"], 7)
+                self.assertFalse(response["mappingFallback"])
+
+    def test_low_confidence_phone_still_uses_bin_one_fallback(self) -> None:
+        response = self.predict_with(
+            qwen_result(
+                "unknown",
+                confidence=0.2,
+                object_name="โทรศัพท์มือถือพร้อมเคส",
+            )
+        )
+        self.assertEqual(response["normalizedWasteType"], "ewaste")
+        self.assertEqual(response["mappedBin"]["number"], 1)
+        self.assertTrue(response["mappingFallback"])
+
+    def test_legacy_class_field_cannot_select_a_canonical_bin(self) -> None:
+        content = json.dumps({
+            "class": "paper",
+            "itemNameTh": "กระดาษ",
+            "confidence": 0.99,
+        }, ensure_ascii=False)
+        response = self.predict_with({"choices": [{"message": {"content": content}}]})
+        self.assertEqual(response["prediction"]["wasteType"], "unknown")
+        self.assertEqual(response["mappedBin"]["number"], 1)
+        self.assertTrue(response["mappedBin"]["fallback"])
 
     def test_unknown_classification_uses_bin_one_fallback(self) -> None:
         response = self.predict_with(qwen_result("unknown", confidence=0.2))
@@ -248,6 +371,8 @@ class PredictContractTests(unittest.TestCase):
         self.assertEqual(response["bin_id"], "ICT-001-B01")
         self.assertEqual(response["bin_number"], 1)
         self.assertTrue(response["mapping_fallback"])
+        self.assertEqual(response["mappedBin"]["nameTh"], "ขยะทั่วไป (ขยะฝังกลบ)")
+        self.assertTrue(response["mappedBin"]["fallback"])
 
     def test_low_confidence_uses_bin_one_fallback(self) -> None:
         response = self.predict_with(qwen_result("glass", confidence=0.599999))
@@ -256,8 +381,8 @@ class PredictContractTests(unittest.TestCase):
         self.assertEqual(response["bin_number"], 1)
         self.assertTrue(response["mapping_fallback"])
 
-    def test_glass_at_zero_point_six_uses_bin_five(self) -> None:
-        response = self.predict_with(qwen_result("glass", confidence=0.60))
+    def test_glass_at_configured_threshold_uses_bin_five(self) -> None:
+        response = self.predict_with(qwen_result("glass", confidence=0.85))
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["classification_status"], "confirmed")
         self.assertEqual(response["bin_id"], "ICT-001-B05")
@@ -308,8 +433,9 @@ class PredictContractTests(unittest.TestCase):
         response = self.predict_with(qwen_result("ewaste"))
         self.assertEqual(response["status"], "missing_mapping")
         self.assertEqual(response["classification_status"], "unavailable")
-        self.assertIsNone(response["bin_id"])
-        self.assertFalse(response["mapping_fallback"])
+        self.assertEqual(response["mappedBin"]["id"], "ICT-001-B01")
+        self.assertEqual(response["mappedBin"]["number"], 1)
+        self.assertTrue(response["mappedBin"]["fallback"])
 
     def test_malformed_model_content_is_unknown_not_api_failure(self) -> None:
         response = self.predict_with(
@@ -326,7 +452,7 @@ class PredictContractTests(unittest.TestCase):
             "_post_json",
             side_effect=urllib.error.URLError("model offline"),
         ), patch.object(backend.asyncio, "to_thread", new=inline_to_thread):
-            response = asyncio.run(backend.predict(FakeUploadFile()))
+            response = asyncio.run(backend.predict(request=None, file=FakeUploadFile()))
 
         self.assertEqual(response.status_code, 502)
         body = json.loads(response.body)

@@ -73,25 +73,15 @@ export const BIN_MASTER = Object.freeze({
 });
 
 /**
- * Existing organization-defined safety fallback for an unknown classification.
- * Keep this rule explicit and separate from a confirmed `general` prediction.
- */
-export const UNKNOWN_CLASSIFICATION_FALLBACK = Object.freeze({
-  enabled: true,
-  binKey: WASTE_TYPE.GENERAL,
-  reason: 'unknown-classification',
-});
-
-/**
  * A prediction below this score has no confirmed destination in the legacy
  * adapter. Authoritative backend responses provide their resolved status.
  */
 const configuredLowConfidenceThreshold = Number(
-  process.env.NEXT_PUBLIC_LOW_CONFIDENCE_THRESHOLD ?? '0.6',
+  process.env.NEXT_PUBLIC_LOW_CONFIDENCE_THRESHOLD ?? '0.85',
 );
 export const LOW_CONFIDENCE_THRESHOLD = Number.isFinite(configuredLowConfidenceThreshold)
   ? Math.min(1, Math.max(0, configuredLowConfidenceThreshold))
-  : 0.6;
+  : 0.85;
 
 export const UNKNOWN_PRESENTATION = Object.freeze({
   title: 'ไม่สามารถระบุประเภทขยะได้',
@@ -148,10 +138,10 @@ export const LIQUID_DISPOSAL_SCENARIOS = Object.freeze({
 /** Thai presentation labels are only fallbacks when the model has no object name. */
 export const WASTE_TYPE_PRESENTATION = Object.freeze({
   [WASTE_TYPE.GENERAL]: { title: 'ขยะทั่วไป', alt: 'ขยะทั่วไป' },
-  [WASTE_TYPE.PET_BOTTLE]: { title: 'พลาสติก PET', alt: 'ขวดพลาสติก PET' },
+  [WASTE_TYPE.PET_BOTTLE]: { title: 'ขวดพลาสติก', alt: 'ขวดพลาสติก' },
   [WASTE_TYPE.PLASTIC]: { title: 'พลาสติก', alt: 'พลาสติก' },
   [WASTE_TYPE.PAPER]: { title: 'กระดาษ', alt: 'กระดาษ' },
-  [WASTE_TYPE.GLASS]: { title: 'แก้ว', alt: 'ขวดแก้ว' },
+  [WASTE_TYPE.GLASS]: { title: 'ขวดแก้ว', alt: 'ขวดแก้ว' },
   [WASTE_TYPE.METAL]: { title: 'โลหะ', alt: 'โลหะ' },
   [WASTE_TYPE.EWASTE]: { title: 'ขยะอิเล็กทรอนิกส์', alt: 'ขยะอิเล็กทรอนิกส์' },
   [WASTE_TYPE.FUEL]: { title: 'ขยะเชื้อเพลิง', alt: 'ขยะเชื้อเพลิง' },
@@ -160,21 +150,9 @@ export const WASTE_TYPE_PRESENTATION = Object.freeze({
   [WASTE_TYPE.UNKNOWN]: UNKNOWN_PRESENTATION,
 });
 
-/** Temporary compatibility for the former seven-class response. */
-export const LEGACY_CLASS_TO_WASTE_TYPE = Object.freeze({
-  cardboard: WASTE_TYPE.PAPER,
-  glass: WASTE_TYPE.GLASS,
-  metal: WASTE_TYPE.METAL,
-  paper: WASTE_TYPE.PAPER,
-  pet: WASTE_TYPE.PET_BOTTLE,
-  other: WASTE_TYPE.PLASTIC,
-  trash: WASTE_TYPE.GENERAL,
-});
-
 function normalizeWasteType(value) {
   const normalized = String(value || '').trim().toLowerCase();
-  if (WASTE_TYPES.includes(normalized)) return normalized;
-  return LEGACY_CLASS_TO_WASTE_TYPE[normalized] || WASTE_TYPE.UNKNOWN;
+  return WASTE_TYPES.includes(normalized) ? normalized : WASTE_TYPE.UNKNOWN;
 }
 
 function readConfidence(value) {
@@ -182,8 +160,17 @@ function readConfidence(value) {
   return Math.min(1, Math.max(0, value));
 }
 
-function readItemName(value) {
-  return typeof value === 'string' ? value.trim().slice(0, 120) : '';
+export function getSafeThaiItemName(value, wasteType) {
+  const candidate = typeof value === 'string' ? value.trim().replace(/\s+/gu, ' ') : '';
+  const validThaiOnly = candidate.length > 0 &&
+    /^[\u0E01-\u0E3A\u0E40-\u0E4E\s]+$/u.test(candidate) &&
+    /[\u0E01-\u0E2E]/u.test(candidate);
+  if (validThaiOnly) return candidate.slice(0, 120);
+  return WASTE_TYPE_PRESENTATION[normalizeWasteType(wasteType)]?.title || UNKNOWN_PRESENTATION.title;
+}
+
+function readItemName(value, wasteType) {
+  return getSafeThaiItemName(value, wasteType);
 }
 
 export function getClassificationPresentation(wasteType) {
@@ -193,40 +180,6 @@ export function getClassificationPresentation(wasteType) {
   return {
     ...presentation,
     image: bin.icon,
-  };
-}
-
-/**
- * Resolve only from the canonical wasteType and the master mapping. The
- * model-provided object names are deliberately not accepted by this function.
- */
-/** Legacy response adapter only; never use for an authoritative backend response. */
-export function getBinRecommendation(wasteType, confidence = null) {
-  const type = normalizeWasteType(wasteType);
-  const numericConfidence = readConfidence(confidence);
-  const lowConfidence = numericConfidence === null || numericConfidence < LOW_CONFIDENCE_THRESHOLD;
-
-  if (type === WASTE_TYPE.UNKNOWN) {
-    const fallback = UNKNOWN_CLASSIFICATION_FALLBACK.enabled
-      ? BIN_MASTER[UNKNOWN_CLASSIFICATION_FALLBACK.binKey]
-      : null;
-    if (!fallback) return null;
-
-    return {
-      key: UNKNOWN_CLASSIFICATION_FALLBACK.binKey,
-      ...fallback,
-      isFallback: true,
-      fallbackReason: UNKNOWN_CLASSIFICATION_FALLBACK.reason,
-    };
-  }
-
-  if (lowConfidence) {
-    return null;
-  }
-
-  return {
-    key: type,
-    ...BIN_MASTER[type],
   };
 }
 
@@ -287,12 +240,19 @@ function readBinNumber(value) {
 }
 
 function readBackendMapping(source) {
-  const binId = typeof source?.bin_id === 'string' && source.bin_id.trim()
-    ? source.bin_id.trim()
+  const canonical = source?.mappedBin;
+  const binIdValue = canonical?.id ?? source?.bin_id ?? source?.binId;
+  const binNumberValue = canonical?.number ?? source?.binNumber ?? source?.bin_number;
+  const binNameValue = canonical?.nameTh ?? source?.binName ?? source?.bin_name;
+  const fallbackValue = typeof canonical?.fallback === 'boolean'
+    ? canonical.fallback
+    : source?.mappingFallback === true || source?.mapping_fallback === true;
+  const binId = typeof binIdValue === 'string' && binIdValue.trim()
+    ? binIdValue.trim()
     : null;
-  const binNumber = readBinNumber(source?.bin_number);
-  const binName = typeof source?.bin_name === 'string' && source.bin_name.trim()
-    ? source.bin_name.trim()
+  const binNumber = readBinNumber(binNumberValue);
+  const binName = typeof binNameValue === 'string' && binNameValue.trim()
+    ? binNameValue.trim()
     : null;
   const available = Boolean(binId && binNumber !== null && binName);
 
@@ -301,7 +261,42 @@ function readBackendMapping(source) {
     binId: available ? binId : null,
     binNumber: available ? binNumber : null,
     binName: available ? binName : null,
+    binWasteType: typeof canonical?.wasteType === 'string'
+      ? normalizeWasteType(canonical.wasteType)
+      : null,
+    mappingVersion: typeof canonical?.mappingVersion === 'string'
+      ? canonical.mappingVersion
+      : typeof source?.mapping_version === 'string'
+        ? source.mapping_version
+        : typeof source?.mappingVersion === 'string' ? source.mappingVersion : null,
+    isFallback: fallbackValue,
   };
+}
+
+function traceFrontendMapping(source, wasteType, confidence, backendMapping, mapping) {
+  if (process.env.NODE_ENV === 'production') return;
+  const classificationStatus = source.classificationStatus || source.classification_status;
+  const fallbackReason = !backendMapping.isFallback
+    ? null
+    : classificationStatus === 'unknown'
+      ? 'unknown-classification'
+      : classificationStatus === 'low_confidence'
+        ? 'low-confidence'
+        : classificationStatus === 'unavailable'
+          ? 'no-verified-mapping'
+          : 'backend-fallback';
+  console.debug('[WasteMapping] frontend rendering backend destination', {
+    rawModelCategory: source.prediction?.waste_category ?? source.prediction?.wasteType ?? source.waste_category ?? source.wasteType ?? null,
+    normalizedWasteType: wasteType,
+    confidence,
+    fallbackReason,
+    mappingKeyUsed: backendMapping.binWasteType || (backendMapping.isFallback ? 'general' : wasteType),
+    matchedBinId: mapping?.binId || null,
+    matchedBinNumber: mapping?.binNumber ?? null,
+    matchedBinName: mapping?.binName || null,
+    locationId: source.location_id || null,
+    mappingVersion: backendMapping.mappingVersion || source.mapping_version || null,
+  });
 }
 
 function readFoodScraps(source, predictionObject) {
@@ -310,6 +305,12 @@ function readFoodScraps(source, predictionObject) {
     source?.hasFoodScraps === true ||
     source?.has_food_scraps === true ||
     source?.disposal?.hasFoodScraps === true;
+}
+
+function readHasLiquid(source, predictionObject) {
+  return predictionObject?.has_liquid === true || predictionObject?.hasLiquid === true ||
+    source?.hasLiquid === true || source?.has_liquid === true ||
+    source?.disposal?.hasLiquid === true || source?.disposal?.has_liquid === true;
 }
 
 function readModelDetails(source) {
@@ -427,6 +428,7 @@ function readClassificationFields(source) {
     source?.object_name_th ??
     source?.objectNameTh ??
     source?.itemNameTh,
+    resolvedWasteType,
   );
 
   return {
@@ -435,6 +437,7 @@ function readClassificationFields(source) {
     confidence,
     objectName,
     hasFoodScraps: readFoodScraps(source, predictionObject),
+    hasLiquid: readHasLiquid(source, predictionObject),
   };
 }
 
@@ -444,6 +447,7 @@ function buildNormalizedResult({
   objectNameTh,
   confidence,
   hasFoodScraps,
+  hasLiquid,
   classificationStatus,
   status,
   mapping,
@@ -458,8 +462,15 @@ function buildNormalizedResult({
     source?.liquidPreparationScenario || source?.disposal?.liquidPreparationScenario || '',
   ).toLowerCase();
   const model = readModelDetails(source);
-  const displayObjectName = objectNameTh ||
-    (wasteType !== WASTE_TYPE.UNKNOWN ? WASTE_TYPE_PRESENTATION[wasteType].title : '');
+  const displayObjectName = getSafeThaiItemName(objectNameTh, wasteType);
+  const mappedBin = mapping && mapping.binNumber !== null && mapping.binName ? {
+    id: mapping.binId || null,
+    number: mapping.binNumber,
+    nameTh: mapping.binName,
+    wasteType: mapping.binWasteType || (mapping.isFallback ? WASTE_TYPE.GENERAL : wasteType),
+    mappingVersion: mappingVersion || null,
+    fallback: isFallbackDestination,
+  } : null;
 
   return {
     prediction: {
@@ -471,6 +482,8 @@ function buildNormalizedResult({
       itemNameTh: displayObjectName,
       hasFoodScraps,
       has_food_scraps: hasFoodScraps,
+      hasLiquid,
+      has_liquid: hasLiquid,
       confidence,
     },
     valid_prediction: validPrediction,
@@ -502,6 +515,7 @@ function buildNormalizedResult({
       fallbackReason: mapping?.fallbackReason || null,
       version: mappingVersion || null,
     },
+    mappedBin,
     preparation: readPreparation(
       source,
       {
@@ -523,7 +537,7 @@ function buildNormalizedResult({
     status,
     inference: { latencyMs: typeof source?.inference?.latencyMs === 'number' ? source.inference.latencyMs : null },
     verification: { status: source?.verification?.status || null },
-    disposal: { hasFoodScraps, liquidPreparationScenario },
+    disposal: { hasFoodScraps, has_food_scraps: hasFoodScraps, hasLiquid, has_liquid: hasLiquid, liquidPreparationScenario },
     waste_items: [{
       wasteType,
       waste_category: wasteType,
@@ -539,6 +553,8 @@ function buildNormalizedResult({
       isFallback: isFallbackDestination,
       fallbackReason: mapping?.fallbackReason || null,
       hasFoodScraps,
+      hasLiquid,
+      has_liquid: hasLiquid,
       liquidPreparationScenario,
     }],
   };
@@ -554,18 +570,37 @@ function normalizeLegacyClassificationResponse(source) {
     confidence,
     objectName,
     hasFoodScraps,
+    hasLiquid,
   } = readClassificationFields(source);
   const isLowConfidence = confidence === null || confidence < LOW_CONFIDENCE_THRESHOLD;
   const wasteType = resolvedWasteType === WASTE_TYPE.UNKNOWN || isLowConfidence
     ? WASTE_TYPE.UNKNOWN
     : resolvedWasteType;
   const objectNameTh = wasteType === WASTE_TYPE.UNKNOWN ? '' : objectName;
-  const bin = getBinRecommendation(wasteType, confidence);
-  const isFallbackDestination = Boolean(bin?.isFallback);
-  const classificationStatus = wasteType === WASTE_TYPE.UNKNOWN ? 'unknown' : 'confirmed';
-  const status = bin
+  const backendMapping = readBackendMapping(source);
+  const isFallbackDestination = backendMapping.isFallback;
+  const mappingCanRender = backendMapping.available && (
+    (wasteType !== WASTE_TYPE.UNKNOWN && !isFallbackDestination) ||
+    (backendMapping.binNumber === 1 && isFallbackDestination)
+  );
+  const classificationStatus = wasteType === WASTE_TYPE.UNKNOWN
+    ? (resolvedWasteType === WASTE_TYPE.UNKNOWN ? 'unknown' : 'low_confidence')
+    : 'confirmed';
+  const status = mappingCanRender
     ? (classificationStatus === 'confirmed' ? 'success' : 'unknown')
-    : 'missing_mapping';
+    : (wasteType === WASTE_TYPE.UNKNOWN ? 'unknown' : 'missing_mapping');
+  const mapping = mappingCanRender ? {
+    verified: !isFallbackDestination,
+    binKey: backendMapping.binWasteType || wasteType,
+    binId: backendMapping.binId,
+    binNumber: backendMapping.binNumber,
+    binName: backendMapping.binName,
+    binWasteType: backendMapping.binWasteType,
+    mappingVersion: backendMapping.mappingVersion,
+    isFallback: isFallbackDestination,
+    fallbackReason: isFallbackDestination ? 'backend-fallback' : null,
+  } : null;
+  traceFrontendMapping(source, resolvedWasteType, confidence, backendMapping, mapping);
 
   return buildNormalizedResult({
     source,
@@ -573,18 +608,11 @@ function normalizeLegacyClassificationResponse(source) {
     objectNameTh,
     confidence,
     hasFoodScraps,
+    hasLiquid,
     classificationStatus,
     status,
-    mapping: bin ? {
-      verified: !isFallbackDestination,
-      binKey: bin.key,
-      binId: null,
-      binNumber: bin.number,
-      binName: bin.category,
-      isFallback: isFallbackDestination,
-      fallbackReason: bin.fallbackReason || null,
-    } : null,
-    mappingVersion: source?.mapping?.version || '10-bin-master-v1',
+    mapping,
+    mappingVersion: backendMapping.mappingVersion || source?.mapping?.version || null,
   });
 }
 
@@ -599,16 +627,19 @@ function normalizeAuthoritativeBackendResponse(source) {
     confidence,
     objectName,
     hasFoodScraps,
+    hasLiquid,
   } = readClassificationFields(source);
-  const backendClassificationStatus = typeof source.classification_status === 'string'
-    ? source.classification_status
+  const backendClassificationStatus = typeof (source.classificationStatus || source.classification_status) === 'string'
+    ? (source.classificationStatus || source.classification_status)
     : 'unknown';
   const backendStatus = AUTHORITATIVE_STATUSES.includes(source.status)
     ? source.status
     : 'api_error';
   const backendMapping = readBackendMapping(source);
-  const mappingCanRender = backendMapping.available &&
-    (backendStatus === 'success' || backendStatus === 'unknown');
+  const mappingCanRender = backendMapping.available && (
+    backendStatus === 'success' || backendStatus === 'unknown' ||
+    (backendStatus === 'missing_mapping' && backendMapping.isFallback)
+  );
   const status = backendStatus === 'success' && !mappingCanRender
     ? 'missing_mapping'
     : backendStatus;
@@ -625,9 +656,13 @@ function normalizeAuthoritativeBackendResponse(source) {
     binId: backendMapping.binId,
     binNumber: backendMapping.binNumber,
     binName: backendMapping.binName,
-    isFallback: source.mapping_fallback === true,
+    binWasteType: backendMapping.binWasteType,
+    mappingVersion: backendMapping.mappingVersion,
+    isFallback: backendMapping.isFallback || source.mapping_fallback === true,
     fallbackReason: source.mapping_fallback === true ? 'unknown-classification' : null,
   } : null;
+
+  traceFrontendMapping(source, resolvedWasteType, confidence, backendMapping, mapping);
 
   return buildNormalizedResult({
     source,
@@ -635,6 +670,7 @@ function normalizeAuthoritativeBackendResponse(source) {
     objectNameTh,
     confidence,
     hasFoodScraps,
+    hasLiquid,
     classificationStatus: backendClassificationStatus,
     status,
     mapping,

@@ -49,30 +49,28 @@ class MappingFoundationTests(unittest.TestCase):
             self.assertEqual(decision.bin_id, bin_id)
             self.assertEqual(decision.bin_number, bin_number)
 
-    def test_cardboard_and_paper_share_operational_paper_mapping(self) -> None:
-        cardboard = self.service.resolve(
-            location_id="ICT-001",
-            waste_category="cardboard",
-            confidence=1.0,
-        )
-        paper = self.service.resolve(
-            location_id="ICT-001",
-            waste_category="paper",
-            confidence=1.0,
-        )
-        self.assertEqual(cardboard.to_dict(), paper.to_dict())
-        self.assertEqual(cardboard.bin_id, "ICT-001-B04")
+    def test_noncanonical_categories_fall_back_to_bin_one(self) -> None:
+        for category in ("other", "trash", "cardboard", "compost"):
+            with self.subTest(category=category):
+                decision = self.service.resolve(
+                    location_id="ICT-001",
+                    waste_category=category,
+                    confidence=1.0,
+                )
+                self.assertEqual(decision.classification_status, "unknown")
+                self.assertTrue(decision.mapping_fallback)
+                self.assertEqual(decision.bin_number, 1)
 
-    def test_threshold_is_inclusive_at_zero_point_six(self) -> None:
+    def test_threshold_is_inclusive_at_zero_point_eight_five(self) -> None:
         below = self.service.resolve(
             location_id="ICT-001",
             waste_category="glass",
-            confidence=0.599999,
+            confidence=0.849999,
         )
         at_threshold = self.service.resolve(
             location_id="ICT-001",
             waste_category="glass",
-            confidence=0.60,
+            confidence=0.85,
         )
 
         self.assertEqual(below.classification_status, "low_confidence")
@@ -93,7 +91,7 @@ class MappingFoundationTests(unittest.TestCase):
         self.assertEqual(decision.bin_id, "ICT-001-B01")
         self.assertEqual(decision.bin_number, 1)
 
-    def test_missing_mapping_is_unavailable_and_does_not_guess(self) -> None:
+    def test_missing_mapping_uses_the_explicit_bin_one_fallback(self) -> None:
         raw_config = json.loads(json.dumps(self.raw_ict_config))
         del raw_config["category_mapping"]["ewaste"]
         raw_config["location_id"] = "TEST-MISSING"
@@ -105,9 +103,9 @@ class MappingFoundationTests(unittest.TestCase):
             confidence=0.99,
         )
         self.assertEqual(decision.classification_status, "unavailable")
-        self.assertFalse(decision.mapping_fallback)
-        self.assertIsNone(decision.bin_id)
-        self.assertIsNone(decision.bin_number)
+        self.assertTrue(decision.mapping_fallback)
+        self.assertEqual(decision.bin_id, "ICT-001-B01")
+        self.assertEqual(decision.bin_number, 1)
 
     def test_many_to_one_mapping_is_supported_for_test_location(self) -> None:
         raw_config = json.loads(json.dumps(self.raw_ict_config))

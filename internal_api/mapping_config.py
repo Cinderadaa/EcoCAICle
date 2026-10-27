@@ -34,18 +34,6 @@ SUPPORTED_WASTE_CATEGORIES = frozenset(
     }
 )
 MAPPABLE_WASTE_CATEGORIES = SUPPORTED_WASTE_CATEGORIES - {"unknown"}
-LEGACY_CLASS_TO_WASTE_TYPE = MappingProxyType(
-    {
-        "cardboard": "paper",
-        "glass": "glass",
-        "metal": "metal",
-        "paper": "paper",
-        "pet": "pet_bottle",
-        "other": "plastic",
-        "trash": "general",
-    }
-)
-
 DEFAULT_LOCATION_ID = "ICT-001"
 DEFAULT_CONFIG_DIRECTORY = Path(__file__).resolve().parent / "config" / "locations"
 LOCATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
@@ -81,12 +69,32 @@ class LocationMappingConfig:
 
 
 def normalize_waste_category(value: object) -> str:
-    """Normalize canonical and former seven-class labels to one category."""
+    """Return a canonical waste type; unsupported labels stay unknown."""
 
     normalized = " ".join(str(value or "").strip().lower().split())
-    if normalized in SUPPORTED_WASTE_CATEGORIES:
-        return normalized
-    return LEGACY_CLASS_TO_WASTE_TYPE.get(normalized, "unknown")
+    return normalized if normalized in SUPPORTED_WASTE_CATEGORIES else "unknown"
+
+
+PHONE_OBJECT_NAME_ALIASES = (
+    "โทรศัพท์มือถือ",
+    "มือถือ",
+    "สมาร์ตโฟน",
+    "สมาร์ทโฟน",
+    "โทรศัพท์",
+    "mobile phone",
+    "smartphone",
+    "cell phone",
+)
+
+
+def normalize_prediction_waste_type(category: object, item_name: object = None) -> str:
+    """Normalize a waste type, recognizing mobile phones as e-waste."""
+
+    if isinstance(item_name, str):
+        normalized_name = " ".join(item_name.casefold().split())
+        if any(alias in normalized_name for alias in PHONE_OBJECT_NAME_ALIASES):
+            return "ewaste"
+    return normalize_waste_category(category)
 
 
 def _non_empty_string(value: object, field_name: str) -> str:

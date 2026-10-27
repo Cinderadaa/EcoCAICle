@@ -1,10 +1,9 @@
 # EcoAICle `/predict` API Contract
 
 Phases 1–3 integrate the startup-loaded `MappingService` into the existing
-FastAPI inference endpoint. The Qwen prompt, model request payload, multipart
-file field, and existing response fields remain unchanged. The preparation
-object below is the location-authoritative contract for the confirmed
-food/liquid separation guidance.
+FastAPI inference endpoint. The model identifies waste and validated signals;
+the backend maps that classification to the location's physical bin master.
+The model is never the source of bin identity or display name.
 
 ## Request
 
@@ -31,15 +30,46 @@ The existing fields remain present:
 - `disposal`
 - `model`
 
-The response additionally contains:
+The response additionally contains a canonical `mappedBin` object. Legacy
+`bin_id`, `bin_number`, and `bin_name` fields remain for older clients:
 
 ```json
 {
   "request_id": "uuid",
   "location_id": "ICT-001",
-  "bin_id": "ICT-001-B02",
-  "bin_number": 2,
-  "bin_name": "ขวดพลาสติก PET",
+  "prediction": {
+    "wasteType": "paper",
+    "itemNameTh": "กระดาษทิชชู่ใช้แล้ว",
+    "hasFoodScraps": false,
+    "hasLiquid": false,
+    "confidence": 0.9
+  },
+  "mappedBin": {
+    "id": "ICT-001-B04",
+    "number": 4,
+    "nameTh": "กระดาษ",
+    "wasteType": "paper",
+    "mappingVersion": "ICT-10-bin-v2",
+    "fallback": false
+  },
+  "mappingDecision": {
+    "rawCategory": "paper",
+    "normalizedWasteType": "paper",
+    "binNumber": 4,
+    "binName": "กระดาษ",
+    "mappingFallback": false,
+    "classificationStatus": "confirmed",
+    "mappingKeyUsed": "paper"
+  },
+  "classificationStatus": "confirmed",
+  "rawCategory": "paper",
+  "normalizedWasteType": "paper",
+  "binNumber": 4,
+  "binName": "กระดาษ",
+  "mappingFallback": false,
+  "bin_id": "ICT-001-B04",
+  "bin_number": 4,
+  "bin_name": "กระดาษ",
   "mapping_version": "ICT-10-bin-v2",
   "classification_status": "confirmed",
   "mapping_fallback": false,
@@ -47,15 +77,33 @@ The response additionally contains:
 }
 ```
 
-The prediction carries the existing preparation signal. `has_food_scraps` is
-true only for visible food residue or leftover food. Older responses may
-contain only the snake-case field; clients should accept both aliases:
+Unknown, below-threshold, or unmapped classifications use the configured
+organization fallback. For ICT-001 this is bin 1, `ขยะทั่วไป (ขยะฝังกลบ)`,
+with `mappedBin.fallback` set to `true`.
+
+Phone object names such as `โทรศัพท์มือถือ`, `สมาร์ตโฟน`, `mobile phone`, and
+`cell phone` normalize to `ewaste` before bin lookup. A confidently identified
+phone therefore maps to the configured e-waste bin even when the model's
+category is missing or `unknown`.
+
+`prediction.itemNameTh` is validated as Thai script before it is returned. If
+the model returns empty, malformed, or mixed-language text, the backend uses a
+Thai label for the validated `wasteType`; the frontend applies the same check
+before rendering the title.
+
+`has_food_scraps` is true only for visible food residue or leftover food;
+`has_liquid` is true only for visible leftover liquid. Preparation remains
+based on those validated signals and uses the same `mappedBin` destination.
+Older responses may contain only the snake-case fields; clients should accept
+both aliases:
 
 ```json
 {
   "prediction": {
     "has_food_scraps": false,
-    "hasFoodScraps": false
+    "hasFoodScraps": false,
+    "has_liquid": false,
+    "hasLiquid": false
   },
   "disposal": {
     "hasFoodScraps": false,

@@ -151,8 +151,8 @@ export default function ResultPage() {
       setCountdown(0);
       setPhase('resetting');
       sessionStorage.removeItem('tt:last');
-      // Return to the kiosk scanner so the next capture starts automatically.
-      setTTState(TT_STATES.SCAN);
+      // Return to the attract screen; the next capture begins after presence detection.
+      setTTState(TT_STATES.IDLE);
       window.location.href = '/';
     };
     const interval = setInterval(() => {

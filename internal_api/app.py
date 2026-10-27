@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 try:  # Supports both Docker's working directory and package-style imports.
-    from .mapping_config import MappingConfigError, load_location_config
+    from .mapping_config import MappingConfigError, load_location_config, normalize_prediction_waste_type
     from .mapping_service import LocationMismatchError, MappingService
     from .inference_storage import (
         DEFAULT_STORAGE_ROOT,
@@ -40,7 +40,7 @@ try:  # Supports both Docker's working directory and package-style imports.
         ReviewServiceError,
     )
 except ImportError:  # pragma: no cover - exercised when running app.py directly
-    from mapping_config import MappingConfigError, load_location_config
+    from mapping_config import MappingConfigError, load_location_config, normalize_prediction_waste_type
     from mapping_service import LocationMismatchError, MappingService
     from inference_storage import (
         DEFAULT_STORAGE_ROOT,
@@ -67,13 +67,29 @@ if load_dotenv is not None:
 
 
 API_URL = os.environ.get("QWEN_API_URL", "https://genai-local.boonrawd.co.th/litellm/v1")
-MODEL = os.environ.get("QWEN_MODEL", "qwen3-vl:4b")
+MODEL = os.environ.get("QWEN_MODEL", "qwen3.8:27b")
+QWEN_REQUEST_TIMEOUT_SECONDS = 40
 PROMPT_VERSION = os.environ.get("ECOAICLE_PROMPT_VERSION") or None
 REVIEWER_TOKEN = os.environ.get("ECOAICLE_REVIEWER_TOKEN")
 API_KEY = os.environ.get("QWEN_API_KEY")
 CA_BUNDLE = os.environ.get("QWEN_CA_BUNDLE")
 SSL_CONTEXT = ssl.create_default_context(cafile=CA_BUNDLE) if CA_BUNDLE else ssl.create_default_context()
 LOGGER = logging.getLogger(__name__)
+
+
+def _trace_scan_event(event: str, cycle_id: str, **details: object) -> None:
+    """Emit opt-in local diagnostics for tracing a scan through FastAPI."""
+    if os.environ.get("ECOAICLE_SCAN_TRACE") != "1":
+        return
+    entry = {
+        "event": event,
+        "cycleId": cycle_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **details,
+    }
+    print(f"[ScanTrace] {json.dumps(entry, sort_keys=True)}", flush=True)
+
+
 WASTE_TYPES = {
     "general",
     "pet_bottle",
@@ -90,27 +106,9 @@ WASTE_TYPES = {
 # Compatibility name for callers that imported the former label set.
 LABELS = WASTE_TYPES
 UNKNOWN_WASTE_TYPE = "unknown"
-LEGACY_CLASS_TO_WASTE_TYPE = {
-    "cardboard": "paper",
-    "glass": "glass",
-    "metal": "metal",
-    "paper": "paper",
-    "pet": "pet_bottle",
-    "other": "plastic",
-    "trash": "general",
-}
-LEGACY_CLASS_ITEM_NAMES = {
-    "cardboard": "กระดาษแข็ง",
-    "glass": "ขวดแก้ว",
-    "metal": "กระป๋องโลหะ",
-    "paper": "กระดาษ",
-    "pet": "ขวดน้ำพลาสติก PET",
-    "other": "พลาสติก",
-    "trash": "ขยะทั่วไป",
-}
 DEFAULT_ITEM_NAMES = {
     "general": "ขยะทั่วไป",
-    "pet_bottle": "ขวดพลาสติก PET",
+    "pet_bottle": "ขวดพลาสติก",
     "plastic": "พลาสติก",
     "paper": "กระดาษ",
     "glass": "ขวดแก้ว",
@@ -134,7 +132,7 @@ Object identification rules:
 Waste classification rules:
 - Return exactly one waste_category from this list:
   general, pet_bottle, plastic, paper, glass, metal, ewaste, fuel, hazardous, infectious, unknown.
-- Choose waste_category from visible material and classification evidence, independently from object_name_th. Do not derive the category solely from the generated object name or assume a material from an object type.
+- Choose waste_category from visible material and classification evidence, independently from itemNameTh. Do not derive the category solely from the generated item name or assume a material from an object type.
 - pet_bottle means a beverage bottle made of PET plastic, not merely any bottle or any transparent container.
 - plastic means identifiable plastic that is not a PET beverage bottle. A transparent plastic cup or other plastic container is not pet_bottle unless PET evidence is visible.
 - Distinguish PET plastic from glass using material evidence, not bottle silhouette, neck shape, cap, label, or transparency alone. Both PET and glass can be clear and bottle-shaped.
@@ -144,14 +142,16 @@ Waste classification rules:
 - Choose hazardous, infectious, or ewaste only when the evidence is clear; otherwise choose unknown.
 - If the material or waste category cannot be identified clearly, choose unknown.
 - Set has_food_scraps to true only when food residue or leftover food is clearly visible on or in the item. Do not infer food scraps merely because the item is food packaging.
+- Set has_liquid to true only when leftover liquid is clearly visible in or on the item.
+- itemNameTh must contain Thai script only (Thai letters, Thai marks, and spaces), be concise, and describe the visible waste item. Do not include Chinese, Latin letters, numbers, punctuation, or mixed-language text. If uncertain, use ไม่สามารถระบุได้.
 - Set confidence to a number from 0.0 to 1.0 representing confidence in the combined object identification and waste classification. Use a low value when the image is unclear.
 
 Keep the two decisions separate:
-- object_name_th describes the visible physical object and must not be used to force a material category.
-- waste_category describes the supported material/disposal class. For example, use object_name_th "ขวดน้ำพลาสติก PET" with waste_category "pet_bottle" only when both the beverage-bottle object and PET material are supported; use "ขวดเครื่องดื่มแก้ว" with "glass" only when glass evidence is supported.
+- itemNameTh describes the visible physical object in Thai and must not be used to force a material category.
+- waste_category describes the supported material/disposal class. For example, use itemNameTh "ขวดน้ำพลาสติก" with waste_category "pet_bottle" only when both the beverage-bottle object and PET material are supported; use "ขวดเครื่องดื่มแก้ว" with "glass" only when glass evidence is supported.
 
 Output only valid JSON with no markdown or explanation, in exactly this shape:
-{"object_name_th":"ชื่อวัตถุขยะภาษาไทยแบบสั้น","waste_category":"general|pet_bottle|plastic|paper|glass|metal|ewaste|fuel|hazardous|infectious|unknown","has_food_scraps":false,"confidence":0.0}
+{"itemNameTh":"ชื่อวัตถุขยะภาษาไทยแบบสั้น","waste_category":"general|pet_bottle|plastic|paper|glass|metal|ewaste|fuel|hazardous|infectious|unknown","has_food_scraps":false,"has_liquid":false,"confidence":0.0}
 """
 
 
@@ -181,6 +181,45 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def trace_prediction_requests(request: Request, call_next):
+    if request.method != "POST" or request.url.path != "/predict":
+        return await call_next(request)
+
+    scan_cycle_id = request.headers.get("x-scan-cycle-id", "unknown")
+    reset_cycle_id = request.headers.get("x-reset-cycle-id", scan_cycle_id)
+    started_at = time.perf_counter()
+    _trace_scan_event(
+        "FastAPI prediction request received",
+        scan_cycle_id,
+        method=request.method,
+        path=request.url.path,
+        resetCycleId=reset_cycle_id,
+        contentLength=request.headers.get("content-length"),
+        qwenTimeoutSeconds=QWEN_REQUEST_TIMEOUT_SECONDS,
+    )
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        _trace_scan_event(
+            "FastAPI prediction request failed",
+            scan_cycle_id,
+            name=type(exc).__name__,
+            message=str(exc),
+            resetCycleId=reset_cycle_id,
+            elapsedMs=round((time.perf_counter() - started_at) * 1000),
+        )
+        raise
+    _trace_scan_event(
+        "FastAPI prediction request completed",
+        scan_cycle_id,
+        status=response.status_code,
+        resetCycleId=reset_cycle_id,
+        elapsedMs=round((time.perf_counter() - started_at) * 1000),
+    )
+    return response
 
 
 # Load and validate the location mapping at startup, then use the immutable
@@ -253,7 +292,7 @@ def _one_line(value: object) -> str:
     return " ".join(str(value).split()).lower()
 
 
-def _parse_model_response(raw: object) -> tuple[str, str, bool, float]:
+def _parse_model_response(raw: object) -> tuple[str, str, bool, bool, float, object]:
     """Parse the new contract while accepting the former class response temporarily."""
     text = str(raw).strip()
     if text.startswith("```") and text.endswith("```"):
@@ -262,44 +301,29 @@ def _parse_model_response(raw: object) -> tuple[str, str, bool, float]:
     try:
         response = json.loads(text)
     except json.JSONDecodeError:
-        legacy_label = _one_line(text)
-        waste_type = LEGACY_CLASS_TO_WASTE_TYPE.get(legacy_label, UNKNOWN_WASTE_TYPE)
-        item_name = LEGACY_CLASS_ITEM_NAMES.get(legacy_label, "")
-        return waste_type, item_name or DEFAULT_ITEM_NAMES[waste_type], False, 0.0
+        return UNKNOWN_WASTE_TYPE, DEFAULT_ITEM_NAMES[UNKNOWN_WASTE_TYPE], False, False, 0.0, text[:120]
 
     if not isinstance(response, dict):
-        return UNKNOWN_WASTE_TYPE, DEFAULT_ITEM_NAMES[UNKNOWN_WASTE_TYPE], False, 0.0
+        return UNKNOWN_WASTE_TYPE, DEFAULT_ITEM_NAMES[UNKNOWN_WASTE_TYPE], False, False, 0.0, None
 
-    raw_waste_type = _one_line(
-        response.get("waste_category") or response.get("wasteType") or ""
-    )
-    if not raw_waste_type:
-        # Transitional support for the previous seven-class model response.
-        legacy_label = _one_line(response.get("class", ""))
-        waste_type = LEGACY_CLASS_TO_WASTE_TYPE.get(legacy_label, UNKNOWN_WASTE_TYPE)
-    else:
-        # Accept legacy labels wherever a category field is supplied, then
-        # expose one canonical category to the mapping layer and clients.
-        normalized_waste_type = LEGACY_CLASS_TO_WASTE_TYPE.get(
-            raw_waste_type,
-            raw_waste_type,
-        )
-        waste_type = (
-            normalized_waste_type
-            if normalized_waste_type in WASTE_TYPES
-            else UNKNOWN_WASTE_TYPE
-        )
-
-    item_name = (
-        response.get("object_name_th")
+    raw_category = response.get("waste_category")
+    if raw_category is None:
+        raw_category = response.get("wasteType")
+    raw_item_name = (
+        response.get("itemNameTh")
+        or response.get("item_name_th")
+        or response.get("object_name_th")
         or response.get("objectNameTh")
         or response.get("itemNameTh")
     )
-    if not isinstance(item_name, str) or not item_name.strip():
-        item_name = LEGACY_CLASS_ITEM_NAMES.get(_one_line(response.get("class", "")), "")
-    if not item_name:
+    waste_type = normalize_prediction_waste_type(raw_category, raw_item_name)
+    item_name = raw_item_name
+    item_name = " ".join(item_name.split())[:120] if isinstance(item_name, str) else ""
+    if not item_name or not all(
+        char.isspace() or "\u0e01" <= char <= "\u0e3a" or "\u0e40" <= char <= "\u0e4e"
+        for char in item_name
+    ) or not any("\u0e01" <= char <= "\u0e2e" for char in item_name):
         item_name = DEFAULT_ITEM_NAMES[waste_type]
-    item_name = " ".join(item_name.split())[:120]
 
     confidence = response.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
@@ -308,7 +332,8 @@ def _parse_model_response(raw: object) -> tuple[str, str, bool, float]:
         confidence = 0.0
 
     has_food_scraps = response.get("has_food_scraps") is True or response.get("hasFoodScraps") is True
-    return waste_type, item_name, has_food_scraps, float(confidence)
+    has_liquid = response.get("has_liquid") is True or response.get("hasLiquid") is True
+    return waste_type, item_name, has_food_scraps, has_liquid, float(confidence), raw_category
 
 
 def _post_json(payload: dict) -> dict:
@@ -321,7 +346,11 @@ def _post_json(payload: dict) -> dict:
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=300, context=SSL_CONTEXT) as response:
+    with urllib.request.urlopen(
+        request,
+        timeout=QWEN_REQUEST_TIMEOUT_SECONDS,
+        context=SSL_CONTEXT,
+    ) as response:
         result = json.loads(response.read().decode("utf-8"))
     if not isinstance(result, dict):
         raise ModelResponseError("Expected a JSON object from LiteLLM")
@@ -351,6 +380,13 @@ def _model_api_error(exc: Exception) -> dict[str, object]:
     """Build a safe, useful error without returning the request or image data."""
     host = urlparse(API_URL).hostname or "configured model host"
 
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return {
+            "error": "Model API request timed out",
+            "type": "TimeoutError",
+            "message": f"Qwen request exceeded the {QWEN_REQUEST_TIMEOUT_SECONDS}-second upstream timeout.",
+        }
+
     if isinstance(exc, urllib.error.HTTPError):
         try:
             upstream_detail = " ".join(exc.read(1024).decode("utf-8", errors="replace").split())
@@ -370,6 +406,8 @@ def _model_api_error(exc: Exception) -> dict[str, object]:
             message = f"Could not resolve model host {host}; check DNS/VPN and QWEN_API_URL."
         elif isinstance(reason, ssl.SSLCertVerificationError):
             message = f"TLS certificate verification failed for {host}; configure QWEN_CA_BUNDLE if required."
+        elif isinstance(reason, (TimeoutError, socket.timeout)):
+            message = f"Qwen request exceeded the {QWEN_REQUEST_TIMEOUT_SECONDS}-second upstream timeout."
         else:
             message = str(reason)
         return {"error": "Model API is unreachable", "type": type(reason).__name__, "message": message}
@@ -408,6 +446,8 @@ def _no_preparation(reason: str) -> dict[str, object]:
         "guidance_mode": "combined_food_liquid_contamination",
         "has_food_scraps": None,
         "hasFoodScraps": None,
+        "has_liquid": None,
+        "hasLiquid": None,
         "shared_disposal_destination": None,
         "container_disposal": None,
         "steps": [],
@@ -432,8 +472,10 @@ def _api_error_response(
         "bin_id": None,
         "bin_number": None,
         "bin_name": None,
+        "mappedBin": None,
         "mapping_version": MAPPING_CONFIG.mapping_version if MAPPING_CONFIG else None,
         "classification_status": "api_error",
+        "classificationStatus": "api_error",
         "mapping_fallback": False,
         "status": "api_error",
         "preparation": _no_preparation("api_error"),
@@ -666,8 +708,13 @@ async def health() -> dict[str, str]:
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)) -> object:
+async def predict(request: Request, file: UploadFile = File(...)) -> object:
     request_id = str(uuid.uuid4())
+    request_headers = request.headers if request is not None else {}
+    reset_cycle_id = request_headers.get(
+        "x-reset-cycle-id",
+        request_headers.get("x-scan-cycle-id", "unknown"),
+    )
     request_started_at = time.perf_counter()
     timestamp = _utc_timestamp()
     stored_image: Optional[StoredImage] = None
@@ -776,7 +823,7 @@ async def predict(file: UploadFile = File(...)) -> object:
         )
         return response
 
-    waste_type, item_name_th, has_food_scraps, confidence = _parse_model_response(raw_prediction)
+    waste_type, item_name_th, has_food_scraps, has_liquid, confidence, raw_category = _parse_model_response(raw_prediction)
     try:
         mapping_decision = MAPPING_SERVICE.resolve(
             location_id=MAPPING_LOCATION_ID,
@@ -787,6 +834,7 @@ async def predict(file: UploadFile = File(...)) -> object:
             location_id=MAPPING_LOCATION_ID,
             waste_category=waste_type,
             has_food_scraps=has_food_scraps,
+            has_liquid=has_liquid,
             mapping_decision=mapping_decision,
         )
     except (LocationMismatchError, KeyError, MappingConfigError) as exc:
@@ -824,15 +872,58 @@ async def predict(file: UploadFile = File(...)) -> object:
 
     status = _mapping_api_status(mapping_decision.classification_status)
     preparation = preparation_decision.to_dict()
+    fallback_reason = {
+        "unknown": "unknown-classification",
+        "low_confidence": "low-confidence",
+        "unavailable": "no-verified-mapping",
+    }.get(mapping_decision.classification_status)
+    mapping_key_used = (
+        waste_type
+        if mapping_decision.classification_status == "confirmed"
+        else "general" if mapping_decision.mapping_fallback else None
+    )
+    _trace_scan_event(
+        "Waste-to-bin mapping resolved",
+        reset_cycle_id,
+        requestId=request_id,
+        resetCycleId=reset_cycle_id,
+        rawModelCategory=raw_category,
+        normalizedWasteType=waste_type,
+        confidence=confidence,
+        fallbackReason=fallback_reason,
+        mappingKeyUsed=mapping_key_used,
+        matchedBinId=mapping_decision.bin_id,
+        matchedBinNumber=mapping_decision.bin_number,
+        matchedBinName=mapping_decision.bin_name,
+        mappingFallback=mapping_decision.mapping_fallback,
+        locationId=MAPPING_LOCATION_ID,
+        mappingVersion=mapping_decision.mapping_version,
+    )
+    _trace_scan_event(
+        "Food/liquid preparation resolved",
+        request_id,
+        requestId=request_id,
+        required=preparation_decision.required,
+        signalValue=preparation_decision.signal_value,
+        containerBinId=(preparation_decision.container_disposal or {}).get("bin_id"),
+        containerBinNumber=(preparation_decision.container_disposal or {}).get("bin_number"),
+        mappedBinId=mapping_decision.bin_id,
+        mappedBinNumber=mapping_decision.bin_number,
+        locationId=MAPPING_LOCATION_ID,
+        mappingVersion=mapping_decision.mapping_version,
+    )
+    mapped_waste_type = mapping_key_used or "general"
     prediction_payload: dict[str, object] = {
         # Canonical fields for new clients.
         "waste_category": waste_type,
         "object_name_th": item_name_th,
         "has_food_scraps": has_food_scraps,
+        "has_liquid": has_liquid,
         # Transitional aliases for the existing frontend contract.
         "wasteType": waste_type,
         "itemNameTh": item_name_th,
         "hasFoodScraps": has_food_scraps,
+        "hasLiquid": has_liquid,
         "confidence": confidence,
     }
 
@@ -842,6 +933,8 @@ async def predict(file: UploadFile = File(...)) -> object:
         "disposal": {
             "hasFoodScraps": has_food_scraps,
             "has_food_scraps": has_food_scraps,
+            "hasLiquid": has_liquid,
+            "has_liquid": has_liquid,
             "preparation": preparation,
         },
         "preparation": preparation,
@@ -851,8 +944,31 @@ async def predict(file: UploadFile = File(...)) -> object:
         "bin_id": mapping_decision.bin_id,
         "bin_number": mapping_decision.bin_number,
         "bin_name": mapping_decision.bin_name,
+        "mappedBin": {
+            "id": mapping_decision.bin_id,
+            "number": mapping_decision.bin_number,
+            "nameTh": mapping_decision.bin_name,
+            "wasteType": mapped_waste_type,
+            "mappingVersion": mapping_decision.mapping_version,
+            "fallback": mapping_decision.mapping_fallback,
+        } if mapping_decision.bin_id and mapping_decision.bin_number and mapping_decision.bin_name else None,
+        "mappingDecision": {
+            "rawCategory": raw_category,
+            "normalizedWasteType": waste_type,
+            "binNumber": mapping_decision.bin_number,
+            "binName": mapping_decision.bin_name,
+            "mappingFallback": mapping_decision.mapping_fallback,
+            "classificationStatus": mapping_decision.classification_status,
+            "mappingKeyUsed": mapping_key_used,
+        },
+        "rawCategory": raw_category,
+        "normalizedWasteType": waste_type,
+        "binNumber": mapping_decision.bin_number,
+        "binName": mapping_decision.bin_name,
+        "mappingFallback": mapping_decision.mapping_fallback,
         "mapping_version": mapping_decision.mapping_version,
         "classification_status": mapping_decision.classification_status,
+        "classificationStatus": mapping_decision.classification_status,
         "mapping_fallback": mapping_decision.mapping_fallback,
         "status": status,
     }

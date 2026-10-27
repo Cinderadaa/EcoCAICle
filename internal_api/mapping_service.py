@@ -51,6 +51,7 @@ class PreparationDecision:
     steps: list[dict[str, object]]
     limitation_th: Optional[str]
     has_food_scraps: bool = False
+    has_liquid: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -62,6 +63,8 @@ class PreparationDecision:
             "guidance_mode": self.guidance_mode,
             "has_food_scraps": self.has_food_scraps,
             "hasFoodScraps": self.has_food_scraps,
+            "has_liquid": self.has_liquid,
+            "hasLiquid": self.has_liquid,
             "shared_disposal_destination": self.shared_disposal_destination,
             "container_disposal": self.container_disposal,
             "steps": self.steps,
@@ -120,24 +123,7 @@ class MappingService:
                 return self._unavailable()
             return self._confirmed(bin_id)
 
-        if (
-            self.config.unknown_fallback_enabled
-            and classification_status in self.config.unknown_fallback_statuses
-            and self.config.unknown_fallback_bin_id is not None
-        ):
-            return self._fallback(
-                self.config.unknown_fallback_bin_id,
-                classification_status,
-            )
-
-        return MappingDecision(
-            bin_id=None,
-            bin_number=None,
-            bin_name=None,
-            mapping_version=self.config.mapping_version,
-            classification_status=classification_status,
-            mapping_fallback=False,
-        )
+        return self._bin_one_fallback(classification_status)
 
     def resolve_preparation(
         self,
@@ -145,12 +131,13 @@ class MappingService:
         location_id: str,
         waste_category: object,
         has_food_scraps: bool,
+        has_liquid: bool = False,
         mapping_decision: MappingDecision,
     ) -> PreparationDecision:
         """Resolve the configured two-step preparation flow.
 
-        The model's boolean is intentionally treated as one combined signal:
-        it may indicate food residue, liquid, grease, or contamination.  A
+        The validated food and liquid booleans are treated as one combined
+        preparation signal. A
         preparation flow is emitted only when the location has enabled the
         rule, the category is explicitly configured, and the container has a
         confirmed backend mapping.  This prevents an unknown/fallback or
@@ -166,13 +153,14 @@ class MappingService:
         preparation = self.config.preparation
         version = preparation.get("version")
         signal = preparation.get("signal", "has_food_scraps")
-        preparation_required = has_food_scraps
+        preparation_required = has_food_scraps or has_liquid
         base_kwargs = {
             "version": version if isinstance(version, str) else None,
             "signal": signal if isinstance(signal, str) else "has_food_scraps",
             "signal_value": preparation_required,
             "guidance_mode": "combined_food_liquid_contamination",
             "has_food_scraps": has_food_scraps,
+            "has_liquid": has_liquid,
         }
 
         if preparation.get("enabled") is not True:
@@ -301,11 +289,20 @@ class MappingService:
         )
 
     def _unavailable(self) -> MappingDecision:
+        return self._bin_one_fallback("unavailable")
+
+    def _bin_one_fallback(self, classification_status: str) -> MappingDecision:
+        bin_one_id = next(
+            (item.bin_id for item in self.config.bins.values() if item.bin_number == 1 and item.enabled),
+            None,
+        )
+        if bin_one_id is not None:
+            return self._fallback(bin_one_id, classification_status)
         return MappingDecision(
             bin_id=None,
             bin_number=None,
             bin_name=None,
             mapping_version=self.config.mapping_version,
-            classification_status="unavailable",
+            classification_status=classification_status,
             mapping_fallback=False,
         )

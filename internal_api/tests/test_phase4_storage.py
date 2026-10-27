@@ -83,7 +83,7 @@ class Phase4StorageTests(unittest.TestCase):
             "to_thread",
             new=inline_to_thread,
         ):
-            return asyncio.run(backend.predict(upload or FakeUploadFile()))
+            return asyncio.run(backend.predict(request=None, file=upload or FakeUploadFile()))
 
     def read_jsonl(self, path: Path) -> list[dict[str, object]]:
         if not path.exists():
@@ -130,7 +130,7 @@ class Phase4StorageTests(unittest.TestCase):
         self.assertEqual(records[1]["bin_number"], 1)
         self.assertTrue(records[1]["mapping_fallback"])
 
-    def test_missing_mapping_is_logged_without_a_guessed_destination(self) -> None:
+    def test_missing_mapping_logs_the_explicit_bin_one_fallback(self) -> None:
         raw_config = json.loads(
             json.dumps(
                 {
@@ -173,9 +173,9 @@ class Phase4StorageTests(unittest.TestCase):
         self.assertEqual(response["status"], "missing_mapping")
         self.assertEqual(record["status"], "missing_mapping")
         self.assertEqual(record["classification_status"], "unavailable")
-        self.assertIsNone(record["bin_id"])
-        self.assertIsNone(record["bin_number"])
-        self.assertFalse(record["mapping_fallback"])
+        self.assertEqual(record["bin_id"], "ICT-001-B01")
+        self.assertEqual(record["bin_number"], 1)
+        self.assertTrue(record["mapping_fallback"])
 
     def test_qwen_api_error_still_saves_image_and_is_not_unknown(self) -> None:
         with patch.object(backend, "_post_json", side_effect=urllib.error.URLError("timeout")), patch.object(
@@ -183,7 +183,7 @@ class Phase4StorageTests(unittest.TestCase):
             "to_thread",
             new=inline_to_thread,
         ):
-            response = asyncio.run(backend.predict(FakeUploadFile()))
+            response = asyncio.run(backend.predict(request=None, file=FakeUploadFile()))
 
         body = json.loads(response.body)
         record = self.read_jsonl(self.storage.inference_log_path)[0]
@@ -260,7 +260,7 @@ class Phase4StorageTests(unittest.TestCase):
 
         with patch.object(backend, "_post_json") as model_call:
             with self.assertRaises(HTTPException) as request_error:
-                asyncio.run(backend.predict(FakeUploadFile(b"not-an-image")))
+                asyncio.run(backend.predict(request=None, file=FakeUploadFile(b"not-an-image")))
         self.assertEqual(request_error.exception.status_code, 400)
         model_call.assert_not_called()
         self.assertEqual(list((self.storage.config.root / "images").rglob("*")), [])
