@@ -61,16 +61,16 @@ class MappingFoundationTests(unittest.TestCase):
                 self.assertTrue(decision.mapping_fallback)
                 self.assertEqual(decision.bin_number, 1)
 
-    def test_threshold_is_inclusive_at_zero_point_eight_five(self) -> None:
+    def test_threshold_is_inclusive_at_zero_point_six(self) -> None:
         below = self.service.resolve(
             location_id="ICT-001",
             waste_category="glass",
-            confidence=0.849999,
+            confidence=0.599999,
         )
         at_threshold = self.service.resolve(
             location_id="ICT-001",
             waste_category="glass",
-            confidence=0.85,
+            confidence=0.6,
         )
 
         self.assertEqual(below.classification_status, "low_confidence")

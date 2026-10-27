@@ -1031,19 +1031,23 @@ export default function Page() {
       {(ttState === TT_STATES.IDLE || screenTransition !== 'idle') && (
         <div className={`tt-page tt-welcome-screen${screenTransition !== 'idle' ? ` tt-welcome-screen--${screenTransition}` : ''}`}>
           <div className="tt-idle">
-            {/* Welcome title and subtitle */}
+            {/* Blue zone: logo + title */}
             <div className="tt-idle__top">
+              <div className="tt-idle__logo-wrap">
+                <div className="tt-idle__ring" />
+                <div className="tt-idle__ring" />
+                <div className="tt-idle__ring" />
+                <img src="/Logo.png" alt="EcoAICle" className="tt-idle__logo" />
+              </div>
               <h1 className="tt-idle__title">EcoAICle</h1>
               <p className="tt-idle__subtitle">
-                ระบบคัดแยกขยะอัตโนมัติด้วย AI
+                ให้เราบอกถังที่ใช่<br />
+                ทิ้งถูกถังได้ในไม่กี่วินาที
               </p>
             </div>
 
             <button className="tt-idle__cta" type="button" onClick={beginScanTransition}>
-              <span className="tt-idle__camera-icon" aria-hidden="true">
-                <img className="tt-idle__camera-image" src="/camera.png" alt="" />
-              </span>
-              <span className="tt-idle__cta-hint">เริ่มสแกน</span>
+              <span className="tt-idle__cta-hint">วิธีใช้งาน</span>
               <span className="tt-idle__cta-main">วางขยะหน้ากล้อง</span>
             </button>
           </div>
@@ -1059,7 +1063,7 @@ export default function Page() {
             <header className="tt-scan-heading">
               <h1>EcoAICle</h1>
               <h2>{capturedImage ? 'ถ่ายภาพแล้ว' : '📷 กำลังสแกนขยะ'}</h2>
-              <p>{capturedImage ? 'วางขยะลงได้เลย' : 'วางขยะของคุณหน้ากล้อง ระบบจะถ่ายภาพให้อัตโนมัติ'}</p>
+              {/* <p>{capturedImage ? '' : 'วางขยะของคุณหน้ากล้อง ระบบจะถ่ายภาพให้อัตโนมัติ'}</p> */}
             </header>
 
             {/* Keep the preview live until the captured frame is ready, then freeze it during analysis. */}

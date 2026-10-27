@@ -1,6 +1,7 @@
 import React from 'react';
 import ResultCountdown from '@/components/ResultCountdown';
 import PreparationFlow from '@/components/PreparationFlow';
+import BinSticker from '@/components/BinSticker';
 import { getSafeThaiItemName } from '@/lib/wasteClassification';
 import { getAuthoritativeBin } from '@/lib/resultPresentation';
 
@@ -38,7 +39,7 @@ export default function WasteResult({
           />
         ) : (
           <section
-            className="analysis-screen__result-card"
+            className={`analysis-screen__result-card${bin?.fallback ? ' analysis-screen__result-card--fallback' : ''}`}
             aria-label="คำแนะนำการทิ้ง"
           >
             {isApiError ? (
@@ -48,13 +49,8 @@ export default function WasteResult({
               </div>
             ) : bin ? (
               <>
-                <span className="analysis-screen__destination-label">กรุณาทิ้งลง</span>
-                <div
-                  className="analysis-screen__bin-number-wrap"
-                  aria-label={`หมายเลขถัง ${bin.number}`}
-                >
-                  <strong className="analysis-screen__bin-number">{String(bin.number)}</strong>
-                </div>
+                <span className="analysis-screen__destination-label">ทิ้งลงถัง</span>
+                <BinSticker binNumber={bin.number} binName={bin.category} />
                 <h2 className="analysis-screen__result-title">
                   <strong>{bin.category}</strong>
                 </h2>

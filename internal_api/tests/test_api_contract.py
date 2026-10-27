@@ -382,7 +382,7 @@ class PredictContractTests(unittest.TestCase):
         self.assertTrue(response["mapping_fallback"])
 
     def test_glass_at_configured_threshold_uses_bin_five(self) -> None:
-        response = self.predict_with(qwen_result("glass", confidence=0.85))
+        response = self.predict_with(qwen_result("glass", confidence=0.6))
         self.assertEqual(response["status"], "success")
         self.assertEqual(response["classification_status"], "confirmed")
         self.assertEqual(response["bin_id"], "ICT-001-B05")
