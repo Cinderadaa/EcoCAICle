@@ -515,15 +515,15 @@ def load_location_config(
     """
 
     resolved_location_id = location_id or os.environ.get(
-        "ECOAICLE_LOCATION_ID",
+        "ECOCAICLE_LOCATION_ID",
         DEFAULT_LOCATION_ID,
     )
     if not LOCATION_ID_PATTERN.fullmatch(resolved_location_id):
-        raise MappingConfigError("configured ECOAICLE_LOCATION_ID contains unsupported characters")
+        raise MappingConfigError("configured ECOCAICLE_LOCATION_ID contains unsupported characters")
 
     resolved_config_dir = Path(
         config_dir
-        or os.environ.get("ECOAICLE_MAPPING_CONFIG_DIR", str(DEFAULT_CONFIG_DIRECTORY))
+        or os.environ.get("ECOCAICLE_MAPPING_CONFIG_DIR", str(DEFAULT_CONFIG_DIRECTORY))
     )
     config_path = resolved_config_dir / f"{resolved_location_id}.json"
     raw_config = _read_json(config_path)

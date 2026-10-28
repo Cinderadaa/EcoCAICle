@@ -59,7 +59,7 @@ class PredictContractTests(unittest.TestCase):
         asyncio.run(backend.load_mapping_foundation())
         cls.ict_config = backend.MAPPING_CONFIG
         cls.ict_service = backend.MAPPING_SERVICE
-        cls.storage_directory = tempfile.TemporaryDirectory(prefix="ecoaicle-contract-")
+        cls.storage_directory = tempfile.TemporaryDirectory(prefix="ecocaicle-contract-")
         cls.storage = InferenceStorage(
             StorageConfig(root=Path(cls.storage_directory.name))
         )

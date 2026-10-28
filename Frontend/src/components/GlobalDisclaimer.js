@@ -4,7 +4,7 @@ import React from 'react';
 export default function GlobalDisclaimer() {
   return (
     <footer className="global-disclaimer">
-      EcoAICle may make mistakes. Please double-check the result.
+      EcoCAICle may make mistakes. Please double-check the result.
     </footer>
   );
 }

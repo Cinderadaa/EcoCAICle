@@ -50,8 +50,10 @@ export default function PreparationFlow({
           binNumber={containerDestination.bin_number}
           binName={containerDestination.bin_name}
         />
-        <strong>นำภาชนะไปทิ้งที่ถังนี้</strong>
-        <p>{containerDestination.bin_name}</p>
+        <div className="tt-food-flow__bin-copy">
+          <span className="tt-food-flow__bin-instruction">นำภาชนะไปทิ้งที่ถังนี้</span>
+          <p className="tt-food-flow__bin-name">{containerDestination.bin_name}</p>
+        </div>
       </div>
     </section>
   );

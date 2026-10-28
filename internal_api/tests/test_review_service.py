@@ -36,7 +36,7 @@ class ReviewServiceTests(unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory(prefix="ecoaicle-review-")
+        self.directory = tempfile.TemporaryDirectory(prefix="ecocaicle-review-")
         self.storage = InferenceStorage(StorageConfig(root=Path(self.directory.name)))
         self.storage.initialize()
         self.service = ReviewService(self.storage, self.config)

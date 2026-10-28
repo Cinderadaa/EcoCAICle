@@ -69,8 +69,8 @@ if load_dotenv is not None:
 API_URL = os.environ.get("QWEN_API_URL", "https://genai-local.boonrawd.co.th/litellm/v1")
 MODEL = os.environ.get("QWEN_MODEL", "qwen3.8:27b")
 QWEN_REQUEST_TIMEOUT_SECONDS = 40
-PROMPT_VERSION = os.environ.get("ECOAICLE_PROMPT_VERSION") or None
-REVIEWER_TOKEN = os.environ.get("ECOAICLE_REVIEWER_TOKEN")
+PROMPT_VERSION = os.environ.get("ECOCAICLE_PROMPT_VERSION") or None
+REVIEWER_TOKEN = os.environ.get("ECOCAICLE_REVIEWER_TOKEN")
 API_KEY = os.environ.get("QWEN_API_KEY")
 CA_BUNDLE = os.environ.get("QWEN_CA_BUNDLE")
 SSL_CONTEXT = ssl.create_default_context(cafile=CA_BUNDLE) if CA_BUNDLE else ssl.create_default_context()
@@ -79,7 +79,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _trace_scan_event(event: str, cycle_id: str, **details: object) -> None:
     """Emit opt-in local diagnostics for tracing a scan through FastAPI."""
-    if os.environ.get("ECOAICLE_SCAN_TRACE") != "1":
+    if os.environ.get("ECOCAICLE_SCAN_TRACE") != "1":
         return
     entry = {
         "event": event,
@@ -168,7 +168,7 @@ def _chat_completions_url(api_url: str = API_URL) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
-app = FastAPI(title="EcoAICle API")
+app = FastAPI(title="EcoCAICle API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -226,8 +226,8 @@ async def trace_prediction_requests(request: Request, call_next):
 # configuration for /predict resolution. A process restart is intentionally
 # required after a JSON configuration change; there is no watcher or hot-reload
 # path.
-MAPPING_LOCATION_ID = os.environ.get("ECOAICLE_LOCATION_ID", "ICT-001")
-MAPPING_CONFIG_DIRECTORY = os.environ.get("ECOAICLE_MAPPING_CONFIG_DIR")
+MAPPING_LOCATION_ID = os.environ.get("ECOCAICLE_LOCATION_ID", "ICT-001")
+MAPPING_CONFIG_DIRECTORY = os.environ.get("ECOCAICLE_MAPPING_CONFIG_DIR")
 MAPPING_CONFIG = None
 MAPPING_SERVICE = None
 REVIEW_SERVICE = None

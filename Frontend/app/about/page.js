@@ -4,7 +4,7 @@ import Image from 'next/image';
 export default function Page() {
   return React.createElement(
     'div', { className: 'about-page' },
-    React.createElement('h1', null, '🤔 EcoAICle คืออะไร?'),
+    React.createElement('h1', null, '🤔 EcoCAICle คืออะไร?'),
     React.createElement('p', { className: 'subtitle' }, 'AI ที่ช่วยบอกคุณว่า “ขยะชิ้นนี้ควรไปถังไหน” แถมยังแนะนำวิธีทำให้ขยะสะอาดพร้อมรีไซเคิล'),
     React.createElement('div', { className: 'card' },
       React.createElement('h2', null, '🛠️ วิธีการใช้งาน'),
@@ -49,8 +49,8 @@ export default function Page() {
     React.createElement('div', { className: 'footerMain' },
       React.createElement('span', null, 'พัฒนาโดยทีม '),
       React.createElement('strong', { className: 'footerBrand' },
-        React.createElement(Image, { src: '/Logo.png', alt: 'EcoAICle Logo', width: 24, height: 24 }),
-        'EcoAICle'
+        React.createElement(Image, { src: '/Logo.png', alt: 'EcoCAICle Logo', width: 24, height: 24 }),
+        'EcoCAICle'
       ),
       React.createElement('span', { className: 'muted' }, ' เพื่อสร้างสังคมไร้ขยะอย่างยั่งยืน 🌿')
     ),
@@ -62,7 +62,7 @@ export default function Page() {
         target: '_blank',
         rel: 'noopener noreferrer',
         className: 'footerLink'
-      }, '@EcoAICle')
+      }, '@EcoCAICle')
     )
   ),
     React.createElement('style', null, `

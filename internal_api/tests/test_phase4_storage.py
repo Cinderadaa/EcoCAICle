@@ -64,7 +64,7 @@ class Phase4StorageTests(unittest.TestCase):
         cls.ict_service = backend.MAPPING_SERVICE
 
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory(prefix="ecoaicle-phase4-")
+        self.directory = tempfile.TemporaryDirectory(prefix="ecocaicle-phase4-")
         self.storage = InferenceStorage(
             StorageConfig(root=Path(self.directory.name), max_image_bytes=1024)
         )
@@ -289,7 +289,7 @@ class Phase4StorageTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "ECOAICLE_STORAGE_ROOT": str(Path(backend.__file__).resolve().parents[1]),
+                "ECOCAICLE_STORAGE_ROOT": str(Path(backend.__file__).resolve().parents[1]),
             },
             clear=False,
         ):
@@ -298,7 +298,7 @@ class Phase4StorageTests(unittest.TestCase):
 
         with patch.dict(
             os.environ,
-            {"ECOAICLE_STORAGE_ROOT": self.directory.name, "ECOAICLE_MAX_IMAGE_BYTES": "0"},
+            {"ECOCAICLE_STORAGE_ROOT": self.directory.name, "ECOCAICLE_MAX_IMAGE_BYTES": "0"},
             clear=False,
         ):
             with self.assertRaises(ValueError):

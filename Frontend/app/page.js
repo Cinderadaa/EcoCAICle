@@ -11,7 +11,12 @@ import {
 } from '@/lib/ttState';
 import { WASTE_TYPE, normalizeClassificationResponse } from '@/lib/wasteClassification';
 import { PREDICT_TIMEOUT_MS, requestPrediction } from '@/lib/predictRequest';
-import { attachCameraVideo, getLiveCameraStream, hasLiveVideoTrack } from '@/lib/cameraLifecycle';
+import {
+  attachCameraVideo,
+  getLiveCameraStream,
+  hasLiveVideoTrack,
+  waitForStableCameraFrame,
+} from '@/lib/cameraLifecycle';
 import { mockWasteResults } from '@/data/mockData';
 import WasteResult from '@/components/WasteResult';
 
@@ -22,8 +27,11 @@ const SCAN_RESET_SECONDS = 15;
 const CAPTURE_START_DELAY_MS = 1_000;
 const CAPTURE_RETRY_DELAY_MS = 250;
 const CAMERA_WARMUP_DELAY_MS = 900;
+const CAMERA_FRAME_STABLE_MS = 900;
 const SCREEN_TRANSITION_MS = 540;
 const PRESENCE_STABLE_MS = 650;
+const PRESENCE_FRAME_WIDTH = 64;
+const PRESENCE_FRAME_HEIGHT = 48;
 const ERROR_RESET_DELAY_MS = 2_500;
 // The browser gives the upstream 40-second deadline room to finish after its
 // own 30-second timeout, before allowing a new automatic capture cycle.
@@ -69,6 +77,22 @@ function simpleHash(str) {
     h |= 0;
   }
   return h;
+}
+
+function samplePresenceReference(video, canvas) {
+  if (!video?.videoWidth || !canvas) return null;
+  canvas.width = PRESENCE_FRAME_WIDTH;
+  canvas.height = PRESENCE_FRAME_HEIGHT;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return null;
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+  const gray = new Uint8Array(PRESENCE_FRAME_WIDTH * PRESENCE_FRAME_HEIGHT);
+  for (let pixel = 0; pixel < gray.length; pixel += 1) {
+    const offset = pixel * 4;
+    gray[pixel] = Math.round(data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114);
+  }
+  return gray;
 }
 
 function isFrameEmpty(ctx, w, h, threshold = 2.5) {
@@ -170,6 +194,7 @@ export default function Page() {
   const emptyFrameCountRef = useRef(0);
   const mockResultIndexRef = useRef(0);
   const presenceSinceRef = useRef(null);
+  const scanBackgroundFrameRef = useRef(null);
 
   const [status, setStatus] = useState('กำลังเปิดกล้อง…');
   const [subStatus, setSubStatus] = useState('');
@@ -188,7 +213,9 @@ export default function Page() {
   // Touchless Kiosk Mode Stream
   const [globalStream, setGlobalStream] = useState(null);
   const idleVideoRef = useRef(null);
+  const presenceCanvasRef = useRef(null);
   const lastIdleFrameRef = useRef(null);
+  const cameraBackgroundFrameRef = useRef(null);
 
   function logCamera(message, details = undefined) {
     if (process.env.NODE_ENV === 'development') {
@@ -232,6 +259,8 @@ export default function Page() {
     emptyFrameCountRef.current = 0;
     lastIdleFrameRef.current = null;
     presenceSinceRef.current = null;
+    scanBackgroundFrameRef.current = null;
+    cameraBackgroundFrameRef.current = null;
   }
 
   function cancelActiveScan() {
@@ -348,6 +377,11 @@ export default function Page() {
       getTTState() !== TT_STATES.IDLE ||
       screenTransitionRef.current !== 'idle'
     ) return;
+
+    if (!presenceCanvasRef.current) presenceCanvasRef.current = document.createElement('canvas');
+    const idleReference = cameraBackgroundFrameRef.current ||
+      samplePresenceReference(idleVideoRef.current, presenceCanvasRef.current);
+    scanBackgroundFrameRef.current = idleReference ? new Uint8Array(idleReference) : null;
 
     screenTransitionRef.current = 'preparing';
     setScreenTransition('preparing');
@@ -557,6 +591,7 @@ export default function Page() {
     if (ttState !== TT_STATES.IDLE || !globalStream || screenTransitionRef.current !== 'idle') return;
 
     lastIdleFrameRef.current = null;
+    cameraBackgroundFrameRef.current = null;
     presenceSinceRef.current = null;
 
     const interval = setInterval(() => {
@@ -574,6 +609,8 @@ export default function Page() {
       
       if (!lastIdleFrameRef.current) {
         lastIdleFrameRef.current = new Uint8ClampedArray(currentData);
+        if (!presenceCanvasRef.current) presenceCanvasRef.current = document.createElement('canvas');
+        cameraBackgroundFrameRef.current = samplePresenceReference(video, presenceCanvasRef.current);
         return;
       }
 
@@ -1000,7 +1037,64 @@ export default function Page() {
         return;
       }
 
-      console.log('[Camera] Using auto focus/exposure with stabilization delay');
+      if (!scanBackgroundFrameRef.current) {
+        if (!presenceCanvasRef.current) presenceCanvasRef.current = document.createElement('canvas');
+        scanBackgroundFrameRef.current = samplePresenceReference(video, presenceCanvasRef.current);
+        if (!scanBackgroundFrameRef.current) {
+          retryUntilVideoReady();
+          return;
+        }
+        console.info('[CameraPresence] initialized reference from the live camera frame');
+      }
+
+      setStatus('กำลังรอวัตถุ');
+      setSubStatus('ขยับหรือยื่นขยะเข้ามาในบริเวณกล้อง');
+      const readiness = await waitForStableCameraFrame({
+        video,
+        referenceFrame: scanBackgroundFrameRef.current,
+        stableMs: CAMERA_FRAME_STABLE_MS,
+        shouldCancel: () => cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN,
+        onProgress: ({ state, changedPixelRatio }) => {
+          if (cancelled || !mountedRef.current) return;
+          if (state === 'stable') {
+            setStatus('ภาพคงที่');
+            setSubStatus('กำลังรอภาพนิ่งครบเวลา…');
+            return;
+          }
+          if (state === 'no_object') {
+            console.info('[CameraPresence] waiting for a scene change', {
+              changedPixelRatio: changedPixelRatio === null ? null : Number(changedPixelRatio.toFixed(3)),
+            });
+            setStatus('กำลังรอวัตถุ');
+            setSubStatus('ขยับหรือยื่นขยะเข้ามาในบริเวณกล้อง');
+            return;
+          }
+          if (state === 'exposure') {
+            setStatus('ปรับแสงให้พอดี');
+            setSubStatus('ขยับวัตถุให้อยู่ในบริเวณที่มีแสง');
+            return;
+          }
+          if (state === 'unclear') {
+            setStatus('ภาพยังไม่ชัด');
+            setSubStatus('เช็ดเลนส์และขยับวัตถุให้เห็นชัดขึ้น');
+            return;
+          }
+          setStatus('กำลังรอภาพนิ่ง');
+          setSubStatus('จัดวัตถุให้อยู่กลางภาพและถือให้นิ่ง');
+        },
+      });
+
+      if (readiness.cancelled || cancelled || !mountedRef.current) return;
+      if (!readiness.ready) {
+        retryUntilVideoReady();
+        return;
+      }
+
+      traceScanEvent('stable camera frame ready', scanOperationIdRef.current + 1, {
+        stableForMs: readiness.stableForMs,
+      });
+      console.log('[Camera] Camera frame is clear and stable; sending it to the classifier');
+      setSubStatus('จับภาพวัตถุ…');
       captureAndScan();
     };
 
@@ -1037,17 +1131,19 @@ export default function Page() {
                 <div className="tt-idle__ring" />
                 <div className="tt-idle__ring" />
                 <div className="tt-idle__ring" />
-                <img src="/Logo.png" alt="EcoAICle" className="tt-idle__logo" />
+                <img src="/Logo.png" alt="EcoCAICle" className="tt-idle__logo" />
               </div>
-              <h1 className="tt-idle__title">EcoAICle</h1>
+              <h1 className="tt-idle__title">EcoCAICle</h1>
               <p className="tt-idle__subtitle">
-                ให้เราบอกถังที่ใช่<br />
-                ทิ้งถูกถังได้ในไม่กี่วินาที
+                ระบบคัดแยกขยะอัจฉริยะด้วย AI
               </p>
             </div>
 
             <button className="tt-idle__cta" type="button" onClick={beginScanTransition}>
-              <span className="tt-idle__cta-hint">วิธีใช้งาน</span>
+              <span className="tt-idle__cta-hint">
+                <span className="tt-idle__status-dot" aria-hidden="true" />
+                ระบบพร้อมสแกน
+              </span>
               <span className="tt-idle__cta-main">วางขยะหน้ากล้อง</span>
             </button>
           </div>
@@ -1061,7 +1157,7 @@ export default function Page() {
       >
           <div className="tt-scan-wrap tt-scan-wrap--reference">
             <header className="tt-scan-heading">
-              <h1>EcoAICle</h1>
+              <h1>EcoCAICle</h1>
               <h2>{capturedImage ? 'ถ่ายภาพแล้ว' : '📷 กำลังสแกนขยะ'}</h2>
               {/* <p>{capturedImage ? '' : 'วางขยะของคุณหน้ากล้อง ระบบจะถ่ายภาพให้อัตโนมัติ'}</p> */}
             </header>

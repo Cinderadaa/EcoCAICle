@@ -1,4 +1,4 @@
-# EcoAICle Phase 1–3 Deployment Runbook
+# EcoCAICle Phase 1–3 Deployment Runbook
 
 This runbook is prepared for a controlled deployment. It does not restart,
 deploy, or change any running service.
@@ -15,17 +15,17 @@ into `/app/config`. Therefore the runtime mapping file is:
 Required backend environment:
 
 ```text
-ECOAICLE_LOCATION_ID=ICT-001
-ECOAICLE_MAPPING_CONFIG_DIR=/app/config/locations
+ECOCAICLE_LOCATION_ID=ICT-001
+ECOCAICLE_MAPPING_CONFIG_DIR=/app/config/locations
 ```
 
-`ECOAICLE_MAPPING_CONFIG_DIR` may be omitted because the backend default is
+`ECOCAICLE_MAPPING_CONFIG_DIR` may be omitted because the backend default is
 the same directory, but setting it explicitly is recommended for deployment
 visibility. Startup validation rejects missing or invalid configuration before
 the service becomes ready. Mapping changes require a controlled backend
 restart; there is no hot reload.
 
-The frontend runtime should also receive `ECOAICLE_LOCATION_ID=ICT-001` so
+The frontend runtime should also receive `ECOCAICLE_LOCATION_ID=ICT-001` so
 proxy-generated `api_error` envelopes use the same static location metadata.
 Successful responses still use the backend-provided location ID.
 
@@ -33,7 +33,7 @@ Successful responses still use the backend-provided location ID.
 
 Read-only inspection on 2026-10-21 found:
 
-- `ecoaicle-frontend` is attached to Docker network `nginx-proxy`.
+- `ecocaicle-frontend` is attached to Docker network `nginx-proxy`.
 - Its configured `MODEL_BASE_URL` is
   `http://host.docker.internal:8000`.
 - `host.docker.internal` resolves from the frontend container and port 8000
@@ -81,7 +81,7 @@ name is assumed by this repository.
 3. Build the backend image and verify that
    `/app/config/locations/ICT-001.json` is present inside the image.
 4. Start the backend in the staging/change target with:
-   `ECOAICLE_LOCATION_ID=ICT-001` and the mapping directory above.
+   `ECOCAICLE_LOCATION_ID=ICT-001` and the mapping directory above.
 5. From the frontend container, verify:
 
    - `GET http://<backend>/health` returns HTTP 200 and `status: ok`.

@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 export const dynamic = 'force-dynamic';
 
 const MODEL_BASE_URL = process.env.MODEL_BASE_URL || 'http://127.0.0.1:8001';
-const REVIEWER_TOKEN = process.env.ECOAICLE_REVIEWER_TOKEN || '';
+const REVIEWER_TOKEN = process.env.ECOCAICLE_REVIEWER_TOKEN || '';
 
 function errorResponse(error, message, status) {
   return NextResponse.json(

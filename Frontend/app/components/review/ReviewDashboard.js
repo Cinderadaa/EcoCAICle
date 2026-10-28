@@ -77,7 +77,7 @@ export default function ReviewDashboard({ mode = 'queue' }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    const stored = window.localStorage.getItem('ecoaicle.review.reviewer_id');
+    const stored = window.localStorage.getItem('ecocaicle.review.reviewer_id');
     if (stored) setReviewerId(stored);
   }, []);
 
@@ -137,7 +137,7 @@ export default function ReviewDashboard({ mode = 'queue' }) {
       setError('กรุณาระบุรหัสผู้ตรวจสอบก่อนบันทึก');
       return;
     }
-    window.localStorage.setItem('ecoaicle.review.reviewer_id', cleanReviewerId);
+    window.localStorage.setItem('ecocaicle.review.reviewer_id', cleanReviewerId);
     setSubmitting(true);
     setError('');
     try {
@@ -169,7 +169,7 @@ export default function ReviewDashboard({ mode = 'queue' }) {
   return <div className={styles.reviewShell}>
     <header className={styles.header}>
       <div>
-        <h1>EcoAICle Review & Evaluation</h1>
+        <h1>EcoCAICle Review & Evaluation</h1>
         <p>Local-only ground truth review · location {metrics.location_id || '—'} · mapping {metrics.mapping_version || '—'}</p>
       </div>
       <nav className={styles.nav} aria-label="Review navigation">

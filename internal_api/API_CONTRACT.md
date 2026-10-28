@@ -1,4 +1,4 @@
-# EcoAICle `/predict` API Contract
+# EcoCAICle `/predict` API Contract
 
 Phases 1–3 integrate the startup-loaded `MappingService` into the existing
 FastAPI inference endpoint. The model identifies waste and validated signals;
@@ -18,7 +18,7 @@ Required multipart field:
 file: image file
 ```
 
-The backend uses the static `ECOAICLE_LOCATION_ID` deployment setting. No
+The backend uses the static `ECOCAICLE_LOCATION_ID` deployment setting. No
 client-supplied location is accepted or trusted.
 
 ## Successful response
@@ -280,7 +280,7 @@ contents are never logged. No public route exposes the stored files.
 ## Phase 5 local reviewer API
 
 The reviewer API is separate from the kiosk `/predict` contract. It is enabled
-only when `ECOAICLE_REVIEWER_TOKEN` is configured, accepts requests from the
+only when `ECOCAICLE_REVIEWER_TOKEN` is configured, accepts requests from the
 loopback interface, and is intended to be reached through the local Next.js
 review proxy. The token is sent in the server-side `X-Reviewer-Token` header;
 it is never exposed to browser JavaScript.

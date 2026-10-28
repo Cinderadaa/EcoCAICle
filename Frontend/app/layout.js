@@ -1,6 +1,6 @@
 // Note: Files in /public are served from root path (no /public prefix)
 export const metadata = {
-  title: 'EcoAICle — AI Waste Sorting',
+  title: 'EcoCAICle — AI Waste Sorting',
   icons: {
     icon: '/Logo.png',
     apple: '/Logo.png',

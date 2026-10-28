@@ -26,7 +26,7 @@ class ReviewApiTests(unittest.TestCase):
         )
 
     def setUp(self) -> None:
-        self.directory = tempfile.TemporaryDirectory(prefix="ecoaicle-review-api-")
+        self.directory = tempfile.TemporaryDirectory(prefix="ecocaicle-review-api-")
         self.storage = InferenceStorage(StorageConfig(root=Path(self.directory.name)))
         self.storage.initialize()
         metadata = validate_image_bytes(

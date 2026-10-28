@@ -11,7 +11,7 @@ Use a development-only reviewer token and bind both services to loopback:
 ```bash
 export ECOAICLE_LOCATION_ID=ICT-001
 export ECOAICLE_MAPPING_CONFIG_DIR="$PWD/internal_api/config/locations"
-export ECOAICLE_STORAGE_ROOT=/tmp/ecoaicle-phase5-data
+export ECOAICLE_STORAGE_ROOT=/tmp/ecoaicle-phase4-data
 export ECOAICLE_REVIEWER_TOKEN='replace-with-a-local-only-token'
 
 python -m uvicorn internal_api.app:app --host 127.0.0.1 --port 8001

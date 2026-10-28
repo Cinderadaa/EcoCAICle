@@ -6,7 +6,7 @@ export const dynamic = "force-dynamic";
 
 const MODEL_BASE_URL =
   process.env.MODEL_BASE_URL || "http://127.0.0.1:8001";
-const LOCATION_ID = process.env.ECOAICLE_LOCATION_ID || "ICT-001";
+const LOCATION_ID = process.env.ECOCAICLE_LOCATION_ID || "ICT-001";
 const PROXY_TIMEOUT_MS = 40_000;
 
 function tracePrediction(event: string, cycleId: string, details: object = {}) {
