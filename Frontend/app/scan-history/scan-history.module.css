@@ -23,28 +23,6 @@
 .filters select { min-width: 150px; max-width: 240px; border: 1px solid #d4dbea; border-radius: 7px; padding: 9px; color: #1f2d45; background: white; font: inherit; }
 .filters .check { display: flex; align-items: center; min-height: 36px; gap: 8px; padding: 0 5px; }
 .check input { width: 16px; height: 16px; accent-color: #2756d4; }
-.pilotPanel { max-width: 1400px; margin: 0 auto 18px; padding: 18px; border: 1px solid #cfd9ef; border-radius: 13px; background: #f7f9ff; }
-.pilotPanelHeader { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
-.pilotPanelHeader h2 { margin: 0; font-size: 20px; }
-.pilotPanelHeader > span,.pilotDisclaimer,.pilotDenominator { color: #637087; font-size: 12px; }
-.pilotDisclaimer { margin: 8px 0 14px; padding: 9px 11px; border-left: 3px solid #d59b20; background: #fff8e8; color: #624a16; }
-.pilotMetrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
-.pilotMetric { display: grid; align-content: start; gap: 6px; min-height: 68px; padding: 10px; border: 1px solid #e2e7f1; border-radius: 9px; background: #fff; }
-.pilotMetric span { color: #637087; font-size: 11px; line-height: 1.4; }
-.pilotMetric strong { color: #25324a; font-size: 17px; overflow-wrap: anywhere; }
-.pilotDenominator { margin: 12px 0 0; }
-.pilotEditor { margin: 16px 0; padding: 16px; border: 1px solid #dce4f3; border-radius: 11px; background: #f8faff; }
-.pilotEditor h3 { margin: 0 0 5px !important; font-size: 16px !important; }
-.pilotEditor > p { margin: 0 0 13px; color: #637087; font-size: 12px; }
-.pilotForm { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.pilotForm label { display: grid; gap: 5px; color: #56647b; font-size: 12px; font-weight: 700; }
-.pilotForm select,.pilotForm textarea { width: 100%; border: 1px solid #d4dbea; border-radius: 7px; padding: 9px; background: white; color: #1f2d45; font: inherit; }
-.pilotForm select:disabled { background: #edf0f5; color: #8994a6; }
-.pilotNote { grid-column: 1 / -1; }
-.pilotSubmitRow { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; color: #637087; font-size: 12px; }
-.pilotSubmit { border: 0; border-radius: 8px; padding: 9px 14px; background: #2756d4; color: #fff; font-weight: 700; }
-.pilotSubmit:disabled { opacity: .55; }
-.pilotState { padding: 12px; color: #637087; font-size: 13px; }
 .count,.list,.empty,.error,.loading { max-width: 1400px; margin-inline: auto; }
 .count { padding: 0 2px 10px; color: #66748b; font-size: 13px; }
 .list { display: grid; gap: 10px; }
@@ -78,4 +56,4 @@
 .noImage { display: grid; place-items: center; height: 180px; border-radius: 9px; background: #eff2f7; color: #718097; }
 .modal > .chips { margin-top: 12px; }.request { color: #718097; font: 12px monospace; overflow-wrap: anywhere; }.modal h3 { margin: 16px 0 7px; font-size: 14px; }
 .record { margin: 0; padding: 14px; overflow: auto; border-radius: 8px; background: #101827; color: #dce7fa; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
-@media (max-width: 640px) { .page { padding-inline: 12px; }.header { align-items: start; }.header h1 { font-size: 24px; }.row { grid-template-columns: 82px minmax(0,1fr); gap: 10px; padding: 9px; }.thumb { height: 76px; }.rowTop > strong { font-size: 14px; }.meta { display: grid; gap: 2px; }.details { gap: 4px 10px; }.filters select { min-width: 135px; }.candidates { display: grid; }.modal { padding: 14px; }.pilotForm { grid-template-columns: 1fr; }.pilotNote,.pilotSubmitRow { grid-column: auto; }.pilotPanel { padding: 13px; } }
+@media (max-width: 640px) { .page { padding-inline: 12px; }.header { align-items: start; }.header h1 { font-size: 24px; }.row { grid-template-columns: 82px minmax(0,1fr); gap: 10px; padding: 9px; }.thumb { height: 76px; }.rowTop > strong { font-size: 14px; }.meta { display: grid; gap: 2px; }.details { gap: 4px 10px; }.filters select { min-width: 135px; }.candidates { display: grid; }.modal { padding: 14px; } }

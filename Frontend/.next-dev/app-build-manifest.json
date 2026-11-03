@@ -16,6 +16,12 @@
       "static/chunks/main-app.js",
       "static/css/app/scan-history/page.css",
       "static/chunks/app/scan-history/page.js"
+    ],
+    "/review/page": [
+      "static/chunks/webpack.js",
+      "static/chunks/main-app.js",
+      "static/css/app/review/page.css",
+      "static/chunks/app/review/page.js"
     ]
   }
 }

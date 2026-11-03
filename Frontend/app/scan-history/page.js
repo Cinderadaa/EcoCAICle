@@ -7,5 +7,5 @@ export default function ScanHistoryPage() {
   if (process.env.ECOAICLE_SCAN_HISTORY_ENABLED !== '1') {
     notFound();
   }
-  return <ScanHistory pilotEvaluationEnabled={process.env.ECOAICLE_PILOT_EVALUATION_ENABLED === '1'} />;
+  return <ScanHistory />;
 }

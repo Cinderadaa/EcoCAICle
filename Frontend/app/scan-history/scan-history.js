@@ -5,7 +5,6 @@ import Image from 'next/image';
 import styles from './scan-history.module.css';
 
 const CATEGORIES = ['general', 'pet_bottle', 'plastic', 'paper', 'glass', 'metal', 'ewaste', 'fuel', 'hazardous', 'infectious', 'unknown'];
-const MATERIAL_SUBTYPES = ['pet_bottle', 'stretch_plastic', 'rigid_plastic', 'plastic_straw', 'multilayer_packaging', 'snack_sachet', 'coffee_sachet', 'refill_pouch', 'non_recyclable_foam', 'plastic_coated_paper', 'non_recyclable_dry_plastic', 'paper', 'cardboard', 'glass', 'metal', 'e_waste', 'hazardous', 'infectious', 'general'];
 const CATEGORY_NAMES = {
   general: 'ทั่วไป', pet_bottle: 'ขวด PET', plastic: 'พลาสติก', paper: 'กระดาษ', glass: 'แก้ว', metal: 'โลหะ',
   ewaste: 'อิเล็กทรอนิกส์', fuel: 'เชื้อเพลิง', hazardous: 'อันตราย', infectious: 'ติดเชื้อ', unknown: 'ไม่ทราบ',
@@ -91,146 +90,7 @@ function CandidateList({ candidates }) {
   ))}</ol>;
 }
 
-function formatAccuracy(metric) {
-  return metric?.value == null ? '—' : `${Math.round(metric.value * 100)}% (${metric.correct}/${metric.eligible_samples})`;
-}
-
-function PilotMetric({ label, value }) {
-  return <div className={styles.pilotMetric}><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function PilotEvaluationEditor({ scan, onSaved }) {
-  const [evaluation, setEvaluation] = useState(null);
-  const [bins, setBins] = useState([]);
-  const [validCapture, setValidCapture] = useState('');
-  const [category, setCategory] = useState('');
-  const [subtype, setSubtype] = useState('');
-  const [binNumber, setBinNumber] = useState('');
-  const [note, setNote] = useState('');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError('');
-    setSaved(false);
-    fetch(`/api/scan-history/pilot/annotations/${encodeURIComponent(scan.request_id)}`, { cache: 'no-store' })
-      .then(async (response) => {
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.message || payload.detail?.message || `โหลดข้อมูลนำร่องไม่สำเร็จ (${response.status})`);
-        if (!active) return;
-        const current = payload.evaluation;
-        setEvaluation(current || null);
-        setBins(Array.isArray(payload.configured_bins) ? payload.configured_bins : []);
-        setValidCapture(current ? (current.valid_capture ? 'yes' : 'no') : '');
-        setCategory(current?.expected_waste_category || '');
-        setSubtype(current?.expected_material_subtype || '');
-        setBinNumber(current?.expected_bin_number == null ? '' : String(current.expected_bin_number));
-        setNote(current?.note || '');
-      })
-      .catch((requestError) => { if (active) setError(requestError.message || 'โหลดข้อมูลนำร่องไม่สำเร็จ'); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [scan.request_id]);
-
-  async function submit(event) {
-    event.preventDefault();
-    setError('');
-    setSaved(false);
-    if (validCapture === '') {
-      setError('กรุณาระบุว่าภาพเป็นการจับภาพที่ใช้ได้หรือไม่');
-      return;
-    }
-    if (validCapture === 'yes' && !category) {
-      setError('กรุณาเลือกประเภทขยะที่ถูกต้อง');
-      return;
-    }
-    if (validCapture === 'yes' && category !== 'unknown' && !binNumber) {
-      setError('กรุณาเลือกหมายเลขถังที่คาดหวัง');
-      return;
-    }
-    setSaving(true);
-    try {
-      const response = await fetch(`/api/scan-history/pilot/annotations/${encodeURIComponent(scan.request_id)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          valid_capture: validCapture === 'yes',
-          expected_waste_category: validCapture === 'yes' ? category : null,
-          expected_material_subtype: validCapture === 'yes' ? (subtype || null) : null,
-          expected_bin_number: validCapture === 'yes' && binNumber ? Number(binNumber) : null,
-          note: note.trim() || null,
-          expected_revision: evaluation?.revision || 0,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.message || payload.detail?.message || `บันทึกผลนำร่องไม่สำเร็จ (${response.status})`);
-      setEvaluation(payload.evaluation);
-      setSaved(true);
-      onSaved?.();
-    } catch (requestError) {
-      setError(requestError.message || 'บันทึกผลนำร่องไม่สำเร็จ');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <section className={styles.pilotEditor} aria-labelledby="pilot-evaluation-title">
-      <h3 id="pilot-evaluation-title">ผลทดสอบนำร่อง · บันทึกผลรายการนี้</h3>
-      <p>ผลนี้จะบันทึกเป็น ground truth scope นำร่องและไม่แก้ไขผลทำนายเดิม</p>
-      {loading ? <div className={styles.pilotState}>กำลังโหลดข้อมูลทดสอบนำร่อง…</div> : (
-        <form className={styles.pilotForm} onSubmit={submit}>
-          <label>ภาพจับได้ถูกต้อง<select value={validCapture} onChange={(event) => {
-            setValidCapture(event.target.value);
-            if (event.target.value === 'no') { setCategory(''); setSubtype(''); setBinNumber(''); }
-          }}><option value="">เลือก</option><option value="yes">ใช่</option><option value="no">ไม่ใช่</option></select></label>
-          <label>ประเภทขยะที่คาดหวัง<select value={category} disabled={validCapture !== 'yes'} onChange={(event) => setCategory(event.target.value)}><option value="">เลือก</option>{CATEGORIES.map((item) => <option key={item} value={item}>{CATEGORY_NAMES[item]} ({item})</option>)}</select></label>
-          <label>ชนิดวัสดุที่คาดหวัง · ไม่บังคับ<select value={subtype} disabled={validCapture !== 'yes'} onChange={(event) => setSubtype(event.target.value)}><option value="">ไม่ระบุ</option>{MATERIAL_SUBTYPES.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
-          <label>หมายเลขถังที่คาดหวัง<select value={binNumber} disabled={validCapture !== 'yes'} onChange={(event) => setBinNumber(event.target.value)}><option value="">เลือกหรือเว้นว่าง</option>{bins.map((bin) => <option key={bin.number} value={bin.number}>ถัง {bin.number} · {bin.name}</option>)}</select></label>
-          <label className={styles.pilotNote}>บันทึกเพิ่มเติม · ไม่บังคับ<textarea value={note} maxLength={2000} onChange={(event) => setNote(event.target.value)} rows={2} /></label>
-          <div className={styles.pilotSubmitRow}><button type="submit" className={styles.pilotSubmit} disabled={saving || loading}>{saving ? 'กำลังบันทึก…' : evaluation ? 'บันทึกฉบับแก้ไข' : 'บันทึกผลทดสอบนำร่อง'}</button>{evaluation && <span>บันทึกแล้ว · ฉบับที่ {evaluation.revision}</span>}{saved && <span role="status">บันทึกผลทดสอบนำร่องแล้ว</span>}</div>
-          {error && <div className={styles.error} role="alert">{error}</div>}
-        </form>
-      )}
-    </section>
-  );
-}
-
-function PilotMetricsPanel({ metrics, error, loading }) {
-  return (
-    <section className={styles.pilotPanel} aria-labelledby="pilot-metrics-title">
-      <div className={styles.pilotPanelHeader}><div><p className={styles.eyebrow}>INTERNAL · PILOT EVALUATION</p><h2 id="pilot-metrics-title">ผลทดสอบนำร่อง</h2></div><span>อิงเฉพาะรายการที่บันทึก scope นำร่อง</span></div>
-      <p className={styles.pilotDisclaimer}>ผลทดสอบนำร่องจากการสแกน 20–30 ครั้งใช้ตรวจสอบเบื้องต้นเท่านั้น ไม่ใช่ข้อกล่าวอ้างความแม่นยำสำหรับระบบ production</p>
-      {loading && !metrics && <div className={styles.pilotState}>กำลังคำนวณผลทดสอบนำร่อง…</div>}
-      {error && <div className={styles.error} role="alert">{error}</div>}
-      {metrics && <>
-        <div className={styles.pilotMetrics}>
-          <PilotMetric label="จำนวนสแกนที่บันทึกผล" value={metrics.attempted_scans} />
-          <PilotMetric label="ภาพจับไม่ถูกต้อง" value={metrics.invalid_captures} />
-          <PilotMetric label="ภาพจับถูกต้อง" value={metrics.valid_captures} />
-          <PilotMetric label="ทำนายเสร็จ" value={metrics.completed_predictions} />
-          <PilotMetric label="อัตราทำนายเสร็จในภาพที่ใช้ได้" value={percent(metrics.valid_capture_completion_rate)} />
-          <PilotMetric label="ความถูกต้องประเภทขยะ" value={formatAccuracy(metrics.classification_accuracy)} />
-          <PilotMetric label="ความถูกต้องหมายเลขถัง" value={formatAccuracy(metrics.bin_accuracy)} />
-          <PilotMetric label="ความถูกต้องชนิดวัสดุ" value={formatAccuracy(metrics.subtype_accuracy)} />
-          <PilotMetric label="หมดเวลาหรือ API error" value={metrics.api_error_count} />
-          <PilotMetric label="หมดเวลา" value={metrics.timeout_count} />
-          <PilotMetric label={`ความมั่นใจตั้งแต่ ${percent(metrics.threshold)} ขึ้นไป`} value={metrics.confidence_breakdown.at_or_above_threshold} />
-          <PilotMetric label={`ความมั่นใจต่ำกว่า ${percent(metrics.threshold)}`} value={metrics.confidence_breakdown.below_threshold} />
-          <PilotMetric label="เวลาอนุมานมัธยฐาน (ms)" value={metrics.completed_inference_latency_ms.median ?? '—'} />
-          <PilotMetric label="เวลาอนุมาน P95 (ms)" value={metrics.completed_inference_latency_ms.p95 ?? '—'} />
-        </div>
-        <p className={styles.pilotDenominator}>ข้อผิดพลาดการจำแนก: {metrics.classification_error_count} · latency นับเฉพาะ prediction ที่เสร็จสมบูรณ์</p>
-      </>}
-    </section>
-  );
-}
-
-export default function ScanHistory({ pilotEvaluationEnabled = false }) {
+export default function ScanHistory() {
   const [scans, setScans] = useState([]);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState({ status: '', waste_category: '', bin_number: '', needs_glass_pet_review: false });
@@ -238,26 +98,6 @@ export default function ScanHistory({ pilotEvaluationEnabled = false }) {
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState('');
-  const [pilotMetrics, setPilotMetrics] = useState(null);
-  const [pilotMetricsError, setPilotMetricsError] = useState('');
-  const [pilotMetricsLoading, setPilotMetricsLoading] = useState(false);
-
-  const loadPilotMetrics = useCallback(async () => {
-    if (!pilotEvaluationEnabled) return;
-    setPilotMetricsLoading(true);
-    setPilotMetricsError('');
-    try {
-      const response = await fetch('/api/scan-history/pilot/metrics', { cache: 'no-store' });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.message || `โหลดผลทดสอบนำร่องไม่สำเร็จ (${response.status})`);
-      setPilotMetrics(payload);
-    } catch (requestError) {
-      setPilotMetricsError(requestError.message || 'โหลดผลทดสอบนำร่องไม่สำเร็จ');
-    } finally {
-      setPilotMetricsLoading(false);
-    }
-  }, [pilotEvaluationEnabled]);
-
   const loadScans = useCallback(async ({ append = false, offset = 0 } = {}) => {
     if (append) setLoadingMore(true);
     else {
@@ -305,7 +145,6 @@ export default function ScanHistory({ pilotEvaluationEnabled = false }) {
   }, [filters]);
 
   useEffect(() => { loadScans(); }, [loadScans]);
-  useEffect(() => { if (pilotEvaluationEnabled) loadPilotMetrics(); }, [pilotEvaluationEnabled, loadPilotMetrics]);
 
   const binOptions = useMemo(() => [...new Set(scans.map((scan) => scan.bin_number).filter((value) => value != null).map(String))].sort((a, b) => Number(a) - Number(b)), [scans]);
 
@@ -328,7 +167,6 @@ export default function ScanHistory({ pilotEvaluationEnabled = false }) {
         <label className={styles.check}><input type="checkbox" checked={filters.needs_glass_pet_review} onChange={(event) => changeFilter('needs_glass_pet_review', event.target.checked)} /> ต้องตรวจ glass / PET</label>
       </div>
 
-      {pilotEvaluationEnabled && <PilotMetricsPanel metrics={pilotMetrics} error={pilotMetricsError} loading={pilotMetricsLoading} />}
 
       <div className={styles.count} aria-live="polite">{loading ? 'กำลังโหลดรายการสแกน…' : `${scans.length} รายการ จาก ${total} รายการที่ตรงกับตัวกรอง`}</div>
       {error && <div className={styles.error} role="alert">{error}</div>}
@@ -360,7 +198,6 @@ export default function ScanHistory({ pilotEvaluationEnabled = false }) {
           {selected.image_available ? <ScanImage key={selected.request_id} requestId={selected.request_id} kind="detail" className={styles.largeImage} alt={`Captured ${selected.object_name_th || 'scan'}`} loading="eager" /> : <div className={styles.noImage}>ไม่มีภาพสำหรับรายการนี้</div>}
           <ScanChips scan={selected} />
           <p className={styles.request}>{selected.request_id}</p>
-          {pilotEvaluationEnabled && <PilotEvaluationEditor key={selected.request_id} scan={selected} onSaved={loadPilotMetrics} />}
           <h3>ข้อมูลที่บันทึกไว้ครบถ้วน</h3>
           <pre className={styles.record}>{JSON.stringify(selected, null, 2)}</pre>
         </section>

@@ -86,42 +86,6 @@ are failure telemetry and are not ordinary classification mistakes.
 The dashboard warns when fewer than 30 reviewed samples exist. An empty queue
 and empty evaluation set are explicit states, not zero-accuracy claims.
 
-## Pilot evaluation in Scan History
-
-The pilot evaluation uses the existing `/scan-history` page, selected scan
-detail, inference records, and the same
-`review/ground_truth_annotations.jsonl` append-only annotation file and
-cross-process lock used by reviewer actions. It adds no separate page, labeling
-service, scan list, or pilot JSONL file. Original inference rows in
-`logs/inference.jsonl` remain immutable.
-
-Enable the mode explicitly in both the FastAPI and Next.js server environments:
-
-```text
-ECOAICLE_PILOT_EVALUATION_ENABLED=1
-```
-
-The existing Scan History enable flag, loopback/allowlist protections, and
-reviewer token remain required. Restart both services after changing their
-server environments. When enabled, the existing Scan History detail panel can
-record valid capture, expected category, optional subtype, expected bin, and an
-optional note. Pilot annotation events include `evaluation_scope: "pilot"` and
-are revisioned independently from ordinary review labels while sharing the
-same protected append path and lock.
-
-The **ผลทดสอบนำร่อง** panel joins the latest pilot annotation for each request
-ID with its immutable inference record. Invalid captures are counted separately
-and excluded from valid-capture accuracy and completion denominators. API and
-timeout errors are counted separately from classification errors and do not
-count as completed predictions. Unknown predictions and fallback bins are
-scored as returned: they are incorrect when they differ from the expected
-category or bin. Subtype accuracy includes only captures with an entered
-expected subtype. Confidence uses the active mapping threshold; latency
-median/P95 include completed valid-capture predictions only.
-
-Treat a 20–30 scan pilot as a small operational check, not a production accuracy
-claim. Review the item images and ground truth before drawing conclusions.
-
 ## Access and privacy limitations
 
 - FastAPI reviewer routes require a loopback client and `X-Reviewer-Token`.

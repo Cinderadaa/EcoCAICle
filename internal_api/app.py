@@ -890,12 +890,6 @@ def _require_reviewer(request: Request) -> None:
         raise HTTPException(status_code=401, detail={"error": "reviewer_unauthorized"})
 
 
-def _require_pilot_evaluation(request: Request) -> None:
-    if os.environ.get("ECOAICLE_PILOT_EVALUATION_ENABLED") != "1":
-        raise HTTPException(status_code=404, detail={"error": "pilot_evaluation_unavailable"})
-    _require_reviewer(request)
-
-
 def _review_service_or_error() -> ReviewService:
     if REVIEW_SERVICE is None:
         raise HTTPException(
@@ -952,37 +946,6 @@ async def review_errors(
     _require_reviewer(request)
     try:
         return _review_service_or_error().errors(error_type=error_type)
-    except ReviewServiceError as exc:
-        _raise_review_http_error(exc)
-
-
-@app.get("/review/pilot/metrics")
-async def pilot_evaluation_metrics(request: Request) -> dict[str, object]:
-    _require_pilot_evaluation(request)
-    try:
-        return _review_service_or_error().pilot_metrics()
-    except ReviewServiceError as exc:
-        _raise_review_http_error(exc)
-
-
-@app.get("/review/pilot/annotations/{request_id}")
-async def get_pilot_evaluation(request: Request, request_id: str) -> dict[str, object]:
-    _require_pilot_evaluation(request)
-    try:
-        return _review_service_or_error().pilot_evaluation(request_id)
-    except ReviewServiceError as exc:
-        _raise_review_http_error(exc)
-
-
-@app.post("/review/pilot/annotations/{request_id}")
-async def submit_pilot_evaluation(
-    request: Request,
-    request_id: str,
-    payload: dict[str, object] = Body(...),
-) -> dict[str, object]:
-    _require_pilot_evaluation(request)
-    try:
-        return _review_service_or_error().submit_pilot_evaluation(request_id, payload)
     except ReviewServiceError as exc:
         _raise_review_http_error(exc)
 
