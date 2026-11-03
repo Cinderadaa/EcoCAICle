@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { attachCameraVideo, getLiveCameraStream } from './cameraLifecycle.js';
+import { attachCameraVideo, getLiveCameraStream, waitForStableCameraFrame } from './cameraLifecycle.js';
 
 function fakeStream() {
   return {
@@ -74,4 +74,63 @@ test('a stopped stream is replaced, and camera permission errors propagate to th
     getLiveCameraStream(null, async () => { throw new DOMException('Permission denied', 'NotAllowedError'); }),
     { name: 'NotAllowedError' },
   );
+});
+
+test('a 0.96 changed-pixel ratio passes presence detection and reaches capture readiness', async () => {
+  const width = 64;
+  const height = 48;
+  const pixelCount = width * height;
+  const rgba = new Uint8ClampedArray(pixelCount * 4);
+  const reference = new Uint8Array(pixelCount);
+
+  for (let pixel = 0; pixel < pixelCount; pixel += 1) {
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    const gray = (x + y) % 2 === 0 ? 80 : 180;
+    // Keep 4% of pixels identical and change the remaining 96% substantially.
+    reference[pixel] = pixel < Math.round(pixelCount * 0.04) ? gray : 255 - gray;
+    rgba[pixel * 4] = gray;
+    rgba[pixel * 4 + 1] = gray;
+    rgba[pixel * 4 + 2] = gray;
+    rgba[pixel * 4 + 3] = 255;
+  }
+
+  const priorDocument = globalThis.document;
+  globalThis.document = {
+    createElement: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({
+        drawImage() {},
+        getImageData: () => ({ data: rgba }),
+      }),
+    }),
+  };
+
+  try {
+    const progress = [];
+    let frameTime = 0;
+    const readiness = await waitForStableCameraFrame({
+      video: {
+        readyState: 2,
+        videoWidth: 640,
+        get currentTime() { frameTime += 1; return frameTime; },
+      },
+      referenceFrame: reference,
+      stableMs: 0,
+      onProgress: (event) => progress.push(event),
+    });
+
+    assert.equal(readiness.ready, true);
+    assert.ok(readiness.changedPixelRatio >= 0.95);
+    assert.ok(progress.some((event) =>
+      event.event === 'presence_check' &&
+      event.presencePassed === true &&
+      event.state === 'stable' &&
+      event.changedPixelRatio >= 0.95,
+    ));
+  } finally {
+    if (priorDocument === undefined) delete globalThis.document;
+    else globalThis.document = priorDocument;
+  }
 });

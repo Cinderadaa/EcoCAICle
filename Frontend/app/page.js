@@ -24,12 +24,10 @@ import WasteResult from '@/components/WasteResult';
 // only when explicitly enabled for a local demo.
 const USE_MOCK_CLASSIFICATION = process.env.NEXT_PUBLIC_USE_MOCK_CLASSIFICATION === 'true';
 const SCAN_RESET_SECONDS = 15;
-const CAPTURE_START_DELAY_MS = 1_000;
 const CAPTURE_RETRY_DELAY_MS = 250;
-const CAMERA_WARMUP_DELAY_MS = 900;
-const CAMERA_FRAME_STABLE_MS = 900;
+const CAMERA_FRAME_STABLE_MS = 800;
 const SCREEN_TRANSITION_MS = 540;
-const PRESENCE_STABLE_MS = 650;
+const PRESENCE_STABLE_MS = 150;
 const PRESENCE_FRAME_WIDTH = 64;
 const PRESENCE_FRAME_HEIGHT = 48;
 const ERROR_RESET_DELAY_MS = 2_500;
@@ -42,6 +40,7 @@ function traceScanEvent(event, cycleId, details = {}) {
   console.debug(`[ScanTrace] ${event}`, {
     cycleId,
     timestamp: new Date().toISOString(),
+    monotonicMs: typeof performance !== 'undefined' ? Number(performance.now().toFixed(1)) : null,
     ...details,
   });
 }
@@ -190,6 +189,7 @@ export default function Page() {
   const cameraInitInFlightRef = useRef(null);
   const cameraWarmedRef = useRef(false);
   const cameraStartRef = useRef(null);
+  const cameraInitStartedAtRef = useRef(null);
   const globalStreamRef = useRef(null);
   const emptyFrameCountRef = useRef(0);
   const mockResultIndexRef = useRef(0);
@@ -208,6 +208,7 @@ export default function Page() {
   const [scanPhase, setScanPhase] = useState(SCAN_PHASES.SCANNING);
   const [scanCycle, setScanCycle] = useState(0);
   const [screenTransition, setScreenTransition] = useState('idle');
+  const scanDebugReasonRef = useRef('');
   const currentResultIndexRef = useRef(0);
   
   // Touchless Kiosk Mode Stream
@@ -223,11 +224,31 @@ export default function Page() {
     }
   }
 
+  function traceCameraTiming(event, details = {}) {
+    const stream = globalStreamRef.current || globalStream;
+    traceScanEvent(event, scanOperationIdRef.current + 1, {
+      phase: scanPhaseRef.current,
+      kioskState: typeof window !== 'undefined' ? getTTState() : 'server',
+      reactKioskState: ttState,
+      liveVideoTrack: hasLiveVideoTrack(stream),
+      pageVisible: typeof document !== 'undefined' ? document.visibilityState === 'visible' : null,
+      ...details,
+    });
+  }
+
+  function updateScanDebugReason(reason) {
+    if (process.env.NODE_ENV !== 'development') return;
+    if (scanDebugReasonRef.current === reason) return;
+    scanDebugReasonRef.current = reason;
+    console.debug('[ScanDebug]', reason);
+  }
+
   function scheduleCameraRetry() {
     if (!mountedRef.current || cameraInitRetryTimerRef.current !== null) return;
     const delayMs = Math.min(15_000, 1_000 * (2 ** cameraRetryAttemptRef.current));
     cameraRetryAttemptRef.current += 1;
     cameraRetryAtRef.current = Date.now() + delayMs;
+      updateScanDebugReason(`waiting for camera: retrying in ${delayMs} ms`);
     cameraInitRetryTimerRef.current = setTimeout(() => {
       cameraInitRetryTimerRef.current = null;
       cameraStartRef.current?.();
@@ -254,17 +275,25 @@ export default function Page() {
     }
   }
 
-  function resetCaptureGuards() {
+  function resetCaptureGuards({ preserveScanBackgroundFrame = false } = {}) {
     scanningRef.current = false;
     emptyFrameCountRef.current = 0;
     lastIdleFrameRef.current = null;
     presenceSinceRef.current = null;
-    scanBackgroundFrameRef.current = null;
+    if (!preserveScanBackgroundFrame) scanBackgroundFrameRef.current = null;
     cameraBackgroundFrameRef.current = null;
   }
 
   function cancelActiveScan() {
     const activeScan = activeScanRef.current;
+    traceScanEvent('active scan cancelled or reset', activeScan?.id || scanOperationIdRef.current, {
+      hadActiveScan: Boolean(activeScan),
+      requestStarted: activeScan?.requestStarted || false,
+      requestCompleted: activeScan?.requestCompleted || false,
+      abortControllerAborted: activeScan?.controller?.signal?.aborted || false,
+      kioskState: getTTState(),
+      scanPhase: scanPhaseRef.current,
+    });
     if (activeScan) {
       activeScan.cancelled = true;
       activeScan.controller.abort();
@@ -292,6 +321,7 @@ export default function Page() {
     traceScanEvent('scan reset started', cycleId, { phase: scanPhaseRef.current });
     logCamera('camera reset requested', { cycle: scanOperationIdRef.current });
     if (activeScanRef.current?.requestStarted && !activeScanRef.current?.requestCompleted) {
+      updateScanDebugReason('capture blocked: request still in flight during reset');
       if (process.env.NODE_ENV !== 'production') {
         console.warn('[Predict] reset before request completed', { cycle: activeScanRef.current.id });
       }
@@ -320,6 +350,7 @@ export default function Page() {
     sessionStorage.removeItem('tt:last');
     setSubStatus('');
     setStatus('วางขยะหน้ากล้องเพื่อเริ่มสแกน');
+    updateScanDebugReason('waiting for object: present waste in the scan area');
     setCountdown(SCAN_RESET_SECONDS);
 
     // A completed result returns straight to Welcome. The reverse scan
@@ -372,21 +403,38 @@ export default function Page() {
   }
 
   async function beginScanTransition() {
-    if (
-      !mountedRef.current ||
-      getTTState() !== TT_STATES.IDLE ||
-      screenTransitionRef.current !== 'idle'
-    ) return;
+    const transitionBlockedBy = [];
+    if (!mountedRef.current) transitionBlockedBy.push('component_unmounted');
+    if (getTTState() !== TT_STATES.IDLE) transitionBlockedBy.push(`kiosk_state_${getTTState()}`);
+    if (screenTransitionRef.current !== 'idle') transitionBlockedBy.push(`transition_${screenTransitionRef.current}`);
+    if (transitionBlockedBy.length) {
+      updateScanDebugReason(`capture blocked: ${transitionBlockedBy.join(', ')}`);
+      traceCameraTiming('scan transition blocked', { blockedBy: transitionBlockedBy });
+      return;
+    }
 
     if (!presenceCanvasRef.current) presenceCanvasRef.current = document.createElement('canvas');
     const idleReference = cameraBackgroundFrameRef.current ||
       samplePresenceReference(idleVideoRef.current, presenceCanvasRef.current);
     scanBackgroundFrameRef.current = idleReference ? new Uint8Array(idleReference) : null;
+    updateScanDebugReason(scanBackgroundFrameRef.current
+      ? 'waiting for object: scene baseline ready'
+      : 'waiting for camera: scene baseline unavailable');
+    traceCameraTiming('idle scene reference captured for scan', {
+      available: Boolean(scanBackgroundFrameRef.current),
+      source: cameraBackgroundFrameRef.current ? 'idle-camera-background' : 'current-idle-frame',
+    });
 
     screenTransitionRef.current = 'preparing';
     setScreenTransition('preparing');
+    traceCameraTiming('scan transition preparation started', { transitionMs: getScreenTransitionDuration() });
     await new Promise((resolve) => requestAnimationFrame(resolve));
-    if (!mountedRef.current || screenTransitionRef.current !== 'preparing') return;
+    if (!mountedRef.current || screenTransitionRef.current !== 'preparing') {
+      const reason = !mountedRef.current ? 'component_unmounted' : `transition_${screenTransitionRef.current}`;
+      updateScanDebugReason(`capture blocked: scan transition cancelled (${reason})`);
+      traceCameraTiming('scan transition cancelled', { stage: 'before_camera_attach', reason });
+      return;
+    }
 
     const stream = globalStreamRef.current;
     if (hasLiveVideoTrack(stream) && videoRef.current) {
@@ -397,7 +445,12 @@ export default function Page() {
         logCamera('camera initialization failed', { phase: 'scan transition playback', message: playError?.message });
       }
     }
-    if (!mountedRef.current || screenTransitionRef.current !== 'preparing') return;
+    if (!mountedRef.current || screenTransitionRef.current !== 'preparing') {
+      const reason = !mountedRef.current ? 'component_unmounted' : `transition_${screenTransitionRef.current}`;
+      updateScanDebugReason(`capture blocked: scan transition cancelled (${reason})`);
+      traceCameraTiming('scan transition cancelled', { stage: 'after_camera_attach', reason });
+      return;
+    }
 
     screenTransitionRef.current = 'entering';
     presenceSinceRef.current = null;
@@ -405,15 +458,19 @@ export default function Page() {
     setStatus('กำลังเตรียมภาพ…');
     traceScanEvent('welcome to scan transition started', scanOperationIdRef.current + 1);
 
+    // Start camera qualification as the visual transition begins; the existing
+    // scene, exposure, sharpness, and stable-frame gates still decide capture.
+    setScanCycle((previousCycle) => previousCycle + 1);
+    setTTState(TT_STATES.SCAN);
+    setTTStateLocal(TT_STATES.SCAN);
+    traceScanEvent('scan state entered during welcome transition', scanOperationIdRef.current + 1);
+
     screenTransitionTimerRef.current = setTimeout(() => {
       screenTransitionTimerRef.current = null;
       if (!mountedRef.current) return;
       screenTransitionRef.current = 'idle';
       setScreenTransition('idle');
-      setScanCycle((previousCycle) => previousCycle + 1);
-      setTTState(TT_STATES.SCAN);
-      setTTStateLocal(TT_STATES.SCAN);
-      traceScanEvent('scan state entered after welcome transition', scanOperationIdRef.current + 1);
+      traceScanEvent('welcome to scan transition completed', scanOperationIdRef.current + 1);
     }, getScreenTransitionDuration());
   }
   beginScanTransitionRef.current = beginScanTransition;
@@ -433,7 +490,7 @@ export default function Page() {
       // เข้าสแกนใหม่ ต้องเป็น live camera เสมอ
       setSubStatus('');
       if (!activeScanRef.current) {
-        resetCaptureGuards();
+        resetCaptureGuards({ preserveScanBackgroundFrame: true });
         transitionScanPhase(SCAN_PHASES.SCANNING);
       }
     }
@@ -443,11 +500,18 @@ export default function Page() {
     mountedRef.current = true;
     traceScanEvent('scan component mounted', scanOperationIdRef.current + 1);
     const persistedState = getTTState();
-    const initialState = persistedState === TT_STATES.SCAN
-      ? TT_STATES.SCAN
-      : TT_STATES.IDLE;
-    setTTState(initialState);
-    setTTStateLocal(initialState);
+    // A SCAN state cannot be resumed safely after a page remount: the prior
+    // empty-scene reference and active capture refs are memory-only.
+    if (persistedState !== TT_STATES.IDLE) {
+      traceScanEvent('stale kiosk state reset on mount', scanOperationIdRef.current + 1, {
+        persistedState,
+        nextState: TT_STATES.IDLE,
+        reason: 'camera scene reference is not persisted',
+      });
+    }
+    setTTState(TT_STATES.IDLE);
+    setTTStateLocal(TT_STATES.IDLE);
+    updateScanDebugReason('waiting for object: present waste in the scan area');
     transitionScanPhase(SCAN_PHASES.SCANNING);
 
     return () => {
@@ -477,7 +541,11 @@ export default function Page() {
   }, []);
 
   function showScanError(message, activeScan = null, resetDelay = ERROR_RESET_DELAY_MS) {
-    if (activeScan && !isActiveScan(activeScan)) return;
+    if (activeScan && !isActiveScan(activeScan)) {
+      updateScanDebugReason('capture blocked: error result belongs to an inactive scan');
+      traceScanEvent('scan error handling blocked', activeScan.id, { reason: 'inactive_scan' });
+      return;
+    }
 
     transitionScanPhase(SCAN_PHASES.ERROR);
     setStatus('วิเคราะห์ไม่สำเร็จ');
@@ -493,12 +561,14 @@ export default function Page() {
       if (cameraInitInFlightRef.current) return cameraInitInFlightRef.current;
       if (hasLiveVideoTrack(globalStreamRef.current)) {
         logCamera('camera stream reused or reinitialized', { mode: 'reused' });
+        traceCameraTiming('camera stream ready', { source: 'reused', elapsedMs: 0 });
         setCameraStatus('ready');
         return globalStreamRef.current;
       }
 
       setCameraStatus('initializing');
       setStatus('กำลังเปิดกล้อง…');
+      cameraInitStartedAtRef.current = performance.now();
       logCamera('camera initialization started');
 
       const cameraRequest = (async () => {
@@ -529,13 +599,22 @@ export default function Page() {
             globalStreamRef.current = stream;
             setGlobalStream(stream);
             setCameraStatus('ready');
+            updateScanDebugReason('waiting for object: camera stream is ready');
             cameraRetryAttemptRef.current = 0;
             cameraRetryAtRef.current = 0;
             if (cameraInitRetryTimerRef.current !== null) {
               clearTimeout(cameraInitRetryTimerRef.current);
               cameraInitRetryTimerRef.current = null;
             }
-            logCamera('camera stream ready', { tracks: stream.getVideoTracks().length });
+            const streamReadyElapsedMs = cameraInitStartedAtRef.current === null
+              ? null
+              : Math.round(performance.now() - cameraInitStartedAtRef.current);
+            logCamera('camera stream ready', { tracks: stream.getVideoTracks().length, elapsedMs: streamReadyElapsedMs });
+            traceCameraTiming('camera stream ready', {
+              tracks: stream.getVideoTracks().length,
+              liveVideoTrack: hasLiveVideoTrack(stream),
+              elapsedMs: streamReadyElapsedMs,
+            });
             traceScanEvent('camera ready', scanOperationIdRef.current + 1, {
               trackCount: stream.getVideoTracks().length,
               mockClassification: USE_MOCK_CLASSIFICATION,
@@ -549,6 +628,7 @@ export default function Page() {
           logCamera('camera initialization failed', { name: e?.name || 'Error', message: e?.message });
           if (mountedRef.current) {
             setCameraStatus('error');
+            updateScanDebugReason(`waiting for camera: initialization failed (${e?.name || 'Error'})`);
             setStatus('ไม่สามารถเปิดกล้องได้');
             setSubStatus('กำลังลองเปิดกล้องใหม่…');
             scheduleCameraRetry();
@@ -585,6 +665,37 @@ export default function Page() {
       });
     }
   }, [globalStream]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      const visible = document.visibilityState === 'visible';
+      traceCameraTiming('browser visibility changed', { visibilityState: document.visibilityState });
+      if (!visible) {
+        updateScanDebugReason('waiting for camera: browser tab is hidden');
+        return;
+      }
+
+      const video = ttState === TT_STATES.SCAN ? videoRef.current : idleVideoRef.current;
+      const stream = globalStreamRef.current || globalStream;
+      if (!hasLiveVideoTrack(stream)) {
+        updateScanDebugReason('waiting for camera: no live video track after tab became visible');
+        return;
+      }
+      attachCameraVideo(video, stream).then(() => {
+        traceCameraTiming('camera playback resumed after visibility change', {
+          readyState: video?.readyState ?? null,
+          videoWidth: video?.videoWidth ?? null,
+          videoHeight: video?.videoHeight ?? null,
+        });
+      }).catch((error) => {
+        updateScanDebugReason(`waiting for camera: playback resume failed (${error?.name || 'Error'})`);
+        traceCameraTiming('camera playback resume failed', { errorName: error?.name || 'Error' });
+      });
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [ttState, globalStream]);
 
   // Motion Detection Loop (IDLE -> SCAN)
   useEffect(() => {
@@ -623,11 +734,26 @@ export default function Page() {
 
       const avgDiff = diffSum / (64 * 64 * 3);
       if (avgDiff > 8) {
-        if (presenceSinceRef.current === null) presenceSinceRef.current = Date.now();
+        if (presenceSinceRef.current === null) {
+          presenceSinceRef.current = Date.now();
+          updateScanDebugReason(`motion detected: confirming for ${PRESENCE_STABLE_MS} ms`);
+          traceCameraTiming('idle motion detected', {
+            averageFrameDifference: Number(avgDiff.toFixed(2)),
+            debounceMs: PRESENCE_STABLE_MS,
+            videoReadyState: video.readyState,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+          });
+          traceCameraTiming('idle presence debounce started', { debounceMs: PRESENCE_STABLE_MS });
+        }
         if (Date.now() - presenceSinceRef.current >= PRESENCE_STABLE_MS) {
-          traceScanEvent('stable item presence detected', scanOperationIdRef.current + 1, {
+          updateScanDebugReason('object trigger fired: entering scan');
+          traceScanEvent('idle object-present detected', scanOperationIdRef.current + 1, {
             averageFrameDifference: Number(avgDiff.toFixed(2)),
             stableForMs: Date.now() - presenceSinceRef.current,
+            kioskState: getTTState(),
+            scanPhase: scanPhaseRef.current,
+            liveVideoTrack: hasLiveVideoTrack(globalStreamRef.current || globalStream),
           });
           beginScanTransitionRef.current?.();
         }
@@ -636,6 +762,7 @@ export default function Page() {
 
       presenceSinceRef.current = null;
       lastIdleFrameRef.current = new Uint8ClampedArray(currentData);
+      updateScanDebugReason('waiting for object: no sustained scene change');
     }, 150);
 
     return () => clearInterval(interval);
@@ -691,7 +818,24 @@ export default function Page() {
     };
   }, [ttState, resultData, scanPhase]);
 
-  async function captureAndScan() {
+  async function captureAndScan({ trigger = 'automatic_scene_detection' } = {}) {
+    const video = videoRef.current;
+    const stream = globalStreamRef.current || globalStream;
+    const attemptSnapshot = {
+      kioskState: getTTState(),
+      reactKioskState: ttState,
+      scanPhase: scanPhaseRef.current,
+      liveVideoTrack: hasLiveVideoTrack(stream),
+      objectTrigger: trigger,
+      videoReadyState: video?.readyState ?? null,
+      videoWidth: video?.videoWidth ?? null,
+      videoHeight: video?.videoHeight ?? null,
+      pageVisible: document.visibilityState === 'visible',
+      activeScan: Boolean(activeScanRef.current),
+      scanningGuard: scanningRef.current,
+    };
+    traceScanEvent('capture attempt', scanOperationIdRef.current + 1, attemptSnapshot);
+
     const blockedBy = [];
     if (!mountedRef.current) {
       blockedBy.push('component_unmounted');
@@ -702,7 +846,11 @@ export default function Page() {
     if (scanningRef.current) blockedBy.push('already_scanning');
     if (activeScanRef.current) blockedBy.push('active_scan_exists');
     if (blockedBy.length) {
-      traceScanEvent('capture trigger blocked', scanOperationIdRef.current + 1, { blockedBy });
+      updateScanDebugReason(`capture blocked: ${blockedBy.join(', ')}`);
+      traceScanEvent('capture trigger blocked', scanOperationIdRef.current + 1, {
+        ...attemptSnapshot,
+        blockedBy,
+      });
       return;
     }
 
@@ -717,14 +865,20 @@ export default function Page() {
     };
     scanOperationIdRef.current = activeScan.id;
     activeScanRef.current = activeScan;
+    updateScanDebugReason('capture allowed: drawing camera frame');
     traceScanEvent('capture started', activeScan.id, {
+      ...attemptSnapshot,
       phase: scanPhaseRef.current,
       mockClassification: USE_MOCK_CLASSIFICATION,
     });
     transitionScanPhase(SCAN_PHASES.CAPTURING);
 
     const applyDetectionResult = (detectionResult) => {
-      if (!isActiveScan(activeScan)) return;
+      if (!isActiveScan(activeScan)) {
+        updateScanDebugReason('capture blocked: result belongs to an inactive scan');
+        traceScanEvent('capture result blocked', activeScan.id, { reason: 'inactive_scan' });
+        return;
+      }
       const normalizedResult = normalizeClassificationResponse(detectionResult);
       if (normalizedResult?.status === 'api_error' || normalizedResult?.valid_prediction === false) {
         const apiError = new Error('Prediction failed');
@@ -800,27 +954,72 @@ export default function Page() {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (!video || !canvas || !video.videoWidth) {
+        const reason = !video
+          ? 'video_element_missing'
+          : !canvas
+            ? 'canvas_element_missing'
+            : 'video_dimensions_unavailable';
+        updateScanDebugReason(`capture blocked: ${reason}`);
+        traceScanEvent('canvas capture blocked', activeScan.id, {
+          reason,
+          kioskState: getTTState(),
+          scanPhase: scanPhaseRef.current,
+          liveVideoTrack: hasLiveVideoTrack(globalStreamRef.current || globalStream),
+          videoReadyState: video?.readyState ?? null,
+          videoWidth: video?.videoWidth ?? null,
+          videoHeight: video?.videoHeight ?? null,
+        });
         const captureError = new Error('กล้องยังไม่พร้อม');
         captureError.scanMessage = 'ไม่สามารถอ่านภาพจากกล้องได้';
         throw captureError;
       }
 
       setSubStatus('กำลังบันทึกภาพ...');
+      traceScanEvent('canvas capture started', activeScan.id, {
+        width: video.videoWidth,
+        height: video.videoHeight,
+      });
+      const canvasCaptureStartedAt = performance.now();
       drawScaledFromVideo(video, canvas);
+      traceScanEvent('canvas frame drawn', activeScan.id, {
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+      });
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       let brightness = checkFrameBrightness(ctx, canvas.width, canvas.height);
       let warmupAttempts = 0;
       while (!brightness.ok && !cameraWarmedRef.current && warmupAttempts < 8) {
-        if (!isActiveScan(activeScan)) return;
+        if (!isActiveScan(activeScan)) {
+          updateScanDebugReason('capture blocked: scan cancelled before brightness retry');
+          traceScanEvent('capture early return', activeScan.id, { reason: 'inactive_scan_before_brightness_retry' });
+          return;
+        }
+        traceScanEvent('brightness retry started', activeScan.id, {
+          attempt: warmupAttempts + 1,
+          meanBrightness: brightness.meanBrightness,
+          retryDelayMs: 250,
+        });
         setStatus('กำลังปรับภาพจากกล้อง…');
         setSubStatus('');
         await new Promise((resolve) => setTimeout(resolve, 250));
-        if (!isActiveScan(activeScan)) return;
+        if (!isActiveScan(activeScan)) {
+          updateScanDebugReason('capture blocked: scan cancelled during brightness retry');
+          traceScanEvent('capture early return', activeScan.id, { reason: 'inactive_scan_after_brightness_retry' });
+          return;
+        }
         drawScaledFromVideo(video, canvas);
         brightness = checkFrameBrightness(ctx, canvas.width, canvas.height);
         warmupAttempts += 1;
       }
       if (!brightness.ok) {
+        updateScanDebugReason(`capture blocked: frame brightness ${brightness.meanBrightness} outside 30–225`);
+        traceScanEvent('canvas capture blocked', activeScan.id, {
+          reason: 'frame_brightness_out_of_range',
+          meanBrightness: brightness.meanBrightness,
+          retryAttempts: warmupAttempts,
+        });
         console.warn(`[SCAN] Frame brightness out of range (${brightness.meanBrightness})`);
         const brightnessError = new Error('ภาพมืดหรือสว่างเกินไป');
         brightnessError.scanMessage = brightnessError.message;
@@ -830,6 +1029,10 @@ export default function Page() {
       setStatus('วางขยะลงได้เลย');
       setSubStatus('');
       const imageBase64 = canvas.toDataURL('image/jpeg', 0.88);
+      traceScanEvent('preview JPEG created', activeScan.id, {
+        elapsedMs: Math.round(performance.now() - canvasCaptureStartedAt),
+        byteLengthApprox: imageBase64.length,
+      });
       capturedImageRef.current = imageBase64;
       setCapturedImage(imageBase64);
       setCapturedImageLoaded(false);
@@ -850,7 +1053,6 @@ export default function Page() {
         const emptyHash = simpleHash(
           ctx.getImageData(0, 0, canvas.width, canvas.height).data.slice(0, 2000).toString()
         );
-        sessionStorage.setItem('tt:emptyHash', String(emptyHash));
       }
 
       transitionScanPhase(SCAN_PHASES.ANALYZING);
@@ -858,17 +1060,50 @@ export default function Page() {
       setSubStatus('กำลังวิเคราะห์...');
 
       if (USE_MOCK_CLASSIFICATION) {
+        updateScanDebugReason('capture blocked: mock classification enabled; no network request');
+        traceScanEvent('prediction request skipped', activeScan.id, { reason: 'mock_classification_enabled' });
         await new Promise(r => setTimeout(r, 500));
-        if (!isActiveScan(activeScan)) return;
+        if (!isActiveScan(activeScan)) {
+          updateScanDebugReason('capture blocked: mock scan cancelled before result');
+          traceScanEvent('capture early return', activeScan.id, { reason: 'inactive_scan_before_mock_result' });
+          return;
+        }
         applyDetectionResult(getNextMockPrediction());
         return;
       }
 
-      const imageBlob = await new Promise((resolve, reject) => {
-        canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Image encoding failed')), 'image/jpeg', 0.88);
+      updateScanDebugReason('encoding captured image');
+      const blobStartedAt = performance.now();
+      traceScanEvent('canvas toBlob started', activeScan.id, {
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
       });
-      if (!isActiveScan(activeScan)) return;
-      traceScanEvent('image payload created', activeScan.id, {
+      const imageBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (blob) {
+            traceScanEvent('canvas toBlob resolved', activeScan.id, {
+              mimeType: blob.type,
+              byteLength: blob.size,
+              elapsedMs: Math.round(performance.now() - blobStartedAt),
+            });
+            resolve(blob);
+          } else {
+            updateScanDebugReason('capture blocked: canvas.toBlob returned no image');
+            traceScanEvent('canvas toBlob failed', activeScan.id, {
+              canvasWidth: canvas.width,
+              canvasHeight: canvas.height,
+              reason: 'empty_blob',
+            });
+            reject(new Error('Image encoding failed'));
+          }
+        }, 'image/jpeg', 0.88);
+      });
+      if (!isActiveScan(activeScan)) {
+        updateScanDebugReason('capture blocked: scan cancelled after JPEG encoding');
+        traceScanEvent('capture early return', activeScan.id, { reason: 'inactive_scan_after_toBlob' });
+        return;
+      }
+      traceScanEvent('JPEG blob created', activeScan.id, {
         mimeType: imageBlob.type,
         byteLength: imageBlob.size,
       });
@@ -877,6 +1112,7 @@ export default function Page() {
       let parsed;
       activeScan.requestStarted = true;
       const requestStartedAt = Date.now();
+      updateScanDebugReason('POST /api/classify sent');
       traceScanEvent('prediction request triggered', activeScan.id, {
         url: '/api/classify',
         method: 'POST',
@@ -889,7 +1125,15 @@ export default function Page() {
           controller: activeScan.controller,
           cycleId: activeScan.id,
           resetCycleId: scanCycle,
-          onStart: () => traceScanEvent('prediction request sent', activeScan.id, { url: '/api/classify' }),
+          onStart: () => {
+            updateScanDebugReason('POST /api/classify sent');
+            traceScanEvent('prediction request sent', activeScan.id, {
+              url: '/api/classify',
+              kioskState: getTTState(),
+              scanPhase: scanPhaseRef.current,
+              liveVideoTrack: hasLiveVideoTrack(globalStreamRef.current || globalStream),
+            });
+          },
           onResponse: (statusCode, elapsedMs) => {
             traceScanEvent('prediction response received', activeScan.id, { status: statusCode, elapsedMs });
           },
@@ -903,7 +1147,11 @@ export default function Page() {
         });
       }
 
-      if (!isActiveScan(activeScan)) return;
+      if (!isActiveScan(activeScan)) {
+        updateScanDebugReason('capture blocked: scan cancelled after prediction request');
+        traceScanEvent('capture early return', activeScan.id, { reason: 'inactive_scan_after_prediction_request' });
+        return;
+      }
       if (process.env.NODE_ENV !== 'production') console.debug('[CLASSIFY RAW]', parsed);
 
       if (!res.ok || parsed?.status === 'api_error') {
@@ -929,11 +1177,21 @@ export default function Page() {
       // normalizer; no category-to-bin mapping is performed here.
       applyDetectionResult(normalized);
     } catch (e) {
-      if (!isActiveScan(activeScan)) return;
+      if (!isActiveScan(activeScan)) {
+        updateScanDebugReason('capture blocked: scan cancelled while handling capture result');
+        traceScanEvent('capture early return', activeScan.id, {
+          reason: 'inactive_scan_in_error_handler',
+          name: e?.name || 'Error',
+        });
+        return;
+      }
       traceScanEvent(activeScan.requestStarted ? 'prediction request failed' : 'capture failed before prediction request', activeScan.id, {
         name: e?.name || 'Error',
         message: e?.message || 'Scan failed',
       });
+      updateScanDebugReason(activeScan.requestStarted
+        ? `request failed: ${e?.name || 'Error'}`
+        : `capture blocked: ${e?.scanMessage || e?.message || e?.name || 'unknown capture error'}`);
 
       if (e.name === 'TimeoutError') {
         console.warn('[SCAN] Detection timed out.');
@@ -949,6 +1207,15 @@ export default function Page() {
       }
     } finally {
       activeScan.requestCompleted = true;
+      traceScanEvent('capture attempt finished', activeScan.id, {
+        kioskState: getTTState(),
+        reactKioskState: ttState,
+        scanPhase: scanPhaseRef.current,
+        liveVideoTrack: hasLiveVideoTrack(globalStreamRef.current || globalStream),
+        requestStarted: activeScan.requestStarted,
+        requestCompleted: activeScan.requestCompleted,
+        controllerAborted: activeScan.controller.signal.aborted,
+      });
       if (activeScanRef.current === activeScan) {
         activeScanRef.current = null;
         scanningRef.current = false;
@@ -964,27 +1231,75 @@ export default function Page() {
     let retryTimer = null;
 
     const retryUntilVideoReady = () => {
-      if (cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN) return;
+      if (cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN) {
+        traceCameraTiming('capture retry blocked', {
+          reason: cancelled
+            ? 'scan_effect_cancelled'
+            : !mountedRef.current
+              ? 'component_unmounted'
+              : `kiosk_state_${getTTState()}`,
+        });
+        return;
+      }
       const untilRetry = Math.max(0, cameraRetryAtRef.current - Date.now());
-      retryTimer = setTimeout(prepareCapture, Math.max(CAPTURE_RETRY_DELAY_MS, untilRetry));
+      const retryDelayMs = Math.max(CAPTURE_RETRY_DELAY_MS, untilRetry);
+      traceCameraTiming('capture preparation retry scheduled', {
+        retryDelayMs,
+        cameraRetryCooldownRemainingMs: untilRetry,
+      });
+      retryTimer = setTimeout(prepareCapture, retryDelayMs);
       cameraRetryTimerRef.current = retryTimer;
     };
 
     const prepareCapture = async () => {
-      if (cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN || scanningRef.current) return;
+      if (cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN || scanningRef.current) {
+        const blockedReason = cancelled
+          ? 'scan_effect_cancelled'
+          : !mountedRef.current
+            ? 'component_unmounted'
+            : getTTState() !== TT_STATES.SCAN
+              ? `kiosk_state_${getTTState()}`
+              : 'already_scanning';
+        updateScanDebugReason(`capture blocked: ${blockedReason}`);
+        traceCameraTiming('capture preparation blocked', {
+          reason: cancelled
+            ? 'scan_effect_cancelled'
+            : !mountedRef.current
+              ? 'component_unmounted'
+              : getTTState() !== TT_STATES.SCAN
+                ? `kiosk_state_${getTTState()}`
+                : 'already_scanning',
+          cancelled,
+          mounted: mountedRef.current,
+          kioskState: getTTState(),
+          scanInProgress: scanningRef.current,
+        });
+        return;
+      }
 
       const video = videoRef.current;
+      setStatus('กำลังตรวจจับขยะ...');
+      setSubStatus('ถือขยะให้นิ่งในบริเวณกล้อง');
+      updateScanDebugReason('waiting for camera: checking live stream and video element');
+      traceCameraTiming('capture preparation started', {
+        hasVideo: Boolean(video),
+        cameraWarmed: cameraWarmedRef.current,
+        hasLiveStream: hasLiveVideoTrack(globalStreamRef.current || globalStream),
+      });
       if (!video) {
+        updateScanDebugReason('waiting for camera: video element not mounted');
         retryUntilVideoReady();
         return;
       }
 
       let stream = globalStreamRef.current || globalStream;
       if (!hasLiveVideoTrack(stream)) {
+        updateScanDebugReason('waiting for camera: no live video track');
         setCameraStatus('initializing');
         setStatus('กำลังเปิดกล้อง…');
         const waitForRetry = cameraRetryAtRef.current - Date.now();
         if (waitForRetry > 0) {
+          updateScanDebugReason(`waiting for camera: retry cooldown ${waitForRetry} ms`);
           retryUntilVideoReady();
           return;
         }
@@ -1000,7 +1315,12 @@ export default function Page() {
           if (initialized.reused) {
             logCamera('camera stream reused or reinitialized', { mode: 'reused', cycle: scanCycle });
           }
-        } catch {
+        } catch (error) {
+          updateScanDebugReason(`waiting for camera: stream start failed (${error?.name || 'Error'})`);
+          traceCameraTiming('camera stream unavailable for capture', {
+            errorName: error?.name || 'Error',
+            message: error?.message || 'stream start failed',
+          });
           retryUntilVideoReady();
           return;
         }
@@ -1017,15 +1337,22 @@ export default function Page() {
         console.warn('[Camera] video.play() is not ready yet', playError);
       }
 
+      const videoFrameWaitStartedAt = performance.now();
+      updateScanDebugReason('waiting for camera: waiting for a fresh video frame');
       if (!(await waitForVideoFrame(video))) {
+        updateScanDebugReason('waiting for camera: no fresh video frame');
+        traceCameraTiming('video frame wait timed out', {
+          elapsedMs: Math.round(performance.now() - videoFrameWaitStartedAt),
+          timeoutMs: 1_500,
+        });
         retryUntilVideoReady();
         return;
       }
-
-      if (!cameraWarmedRef.current) {
-        setStatus('กำลังปรับภาพจากกล้อง…');
-        await new Promise((resolve) => setTimeout(resolve, CAMERA_WARMUP_DELAY_MS));
-      }
+      traceCameraTiming('video frame ready', {
+        elapsedMs: Math.round(performance.now() - videoFrameWaitStartedAt),
+        width: video.videoWidth,
+        height: video.videoHeight,
+      });
 
       if (
         cancelled ||
@@ -1033,35 +1360,113 @@ export default function Page() {
         getTTState() !== TT_STATES.SCAN ||
         !video.videoWidth
       ) {
+        const reason = cancelled
+          ? 'scan_effect_cancelled'
+          : !mountedRef.current
+            ? 'component_unmounted'
+            : getTTState() !== TT_STATES.SCAN
+              ? `kiosk_state_${getTTState()}`
+              : 'video_dimensions_unavailable';
+        updateScanDebugReason(`capture blocked: ${reason}`);
+        traceCameraTiming('capture preparation blocked after video frame', { reason });
         retryUntilVideoReady();
         return;
       }
 
       if (!scanBackgroundFrameRef.current) {
+        updateScanDebugReason('waiting for object: capturing current scene baseline');
         if (!presenceCanvasRef.current) presenceCanvasRef.current = document.createElement('canvas');
         scanBackgroundFrameRef.current = samplePresenceReference(video, presenceCanvasRef.current);
         if (!scanBackgroundFrameRef.current) {
+          updateScanDebugReason('waiting for camera: could not read scene baseline');
           retryUntilVideoReady();
           return;
         }
-        console.info('[CameraPresence] initialized reference from the live camera frame');
+        traceCameraTiming('scan background reference captured', {
+          containsExistingIdleReference: false,
+          width: video.videoWidth,
+          height: video.videoHeight,
+        });
       }
 
-      setStatus('กำลังรอวัตถุ');
-      setSubStatus('ขยับหรือยื่นขยะเข้ามาในบริเวณกล้อง');
+      let lastPresenceState = '';
+      updateScanDebugReason('waiting for object: present waste in the scan area');
       const readiness = await waitForStableCameraFrame({
         video,
         referenceFrame: scanBackgroundFrameRef.current,
         stableMs: CAMERA_FRAME_STABLE_MS,
         shouldCancel: () => cancelled || !mountedRef.current || getTTState() !== TT_STATES.SCAN,
-        onProgress: ({ state, changedPixelRatio }) => {
+        onProgress: ({
+          event,
+          state,
+          changedPixelRatio,
+          presenceThreshold,
+          presencePassed,
+          stabilityTimerStarted,
+          stabilityTimerReset,
+          stabilityElapsedMs,
+          waitElapsedMs,
+          elapsedMs,
+        }) => {
           if (cancelled || !mountedRef.current) return;
+          if (event === 'presence_check' && process.env.NODE_ENV === 'development') {
+            const waitingReason = !presencePassed
+              ? 'waiting_for_scene_change_threshold'
+              : state === 'exposure'
+                ? 'waiting_for_exposure'
+                : state === 'unclear'
+                  ? 'waiting_for_sharp_frame'
+                  : state === 'moving'
+                    ? 'waiting_for_stable_frame'
+                    : 'waiting_for_stability_window';
+            console.debug('[CameraPresence] presence check', {
+              configuredChangeThreshold: presenceThreshold,
+              changedPixelRatio: changedPixelRatio === null ? null : Number(changedPixelRatio.toFixed(4)),
+              thresholdPassed: presencePassed,
+              state,
+              stabilityElapsedMs,
+              stableWindowMs: CAMERA_FRAME_STABLE_MS,
+              waitElapsedMs,
+              waitingReason,
+              kioskState: getTTState(),
+              scanPhase: scanPhaseRef.current,
+            });
+          }
+          if (event === 'object_present') {
+            updateScanDebugReason('object detected: checking frame stability');
+            traceCameraTiming('scan object-present detected', {
+              elapsedMs,
+              changedPixelRatio: changedPixelRatio === null ? null : Number(changedPixelRatio.toFixed(3)),
+            });
+          }
+          if (stabilityTimerStarted) {
+            updateScanDebugReason(`waiting for stable frame: ${CAMERA_FRAME_STABLE_MS} ms`);
+            traceCameraTiming('camera stability timer started', {
+              stableWindowMs: CAMERA_FRAME_STABLE_MS,
+              changedPixelRatio: changedPixelRatio === null ? null : Number(changedPixelRatio.toFixed(3)),
+              waitElapsedMs,
+            });
+          }
+          if (stabilityTimerReset) {
+            updateScanDebugReason(`waiting for stable frame: reset after ${state}`);
+            traceCameraTiming('camera stability timer reset', { state, waitElapsedMs });
+          }
+          if (state && state !== lastPresenceState) {
+            traceCameraTiming('camera presence state changed', {
+              state,
+              waitElapsedMs,
+              changedPixelRatio: changedPixelRatio === null ? null : Number(changedPixelRatio.toFixed(3)),
+            });
+            lastPresenceState = state;
+          }
           if (state === 'stable') {
-            setStatus('ภาพคงที่');
+            updateScanDebugReason('waiting for stable frame: object is steady');
+            setStatus('กำลังตรวจจับขยะ...');
             setSubStatus('กำลังรอภาพนิ่งครบเวลา…');
             return;
           }
           if (state === 'no_object') {
+            updateScanDebugReason('waiting for object: no scene change detected');
             console.info('[CameraPresence] waiting for a scene change', {
               changedPixelRatio: changedPixelRatio === null ? null : Number(changedPixelRatio.toFixed(3)),
             });
@@ -1070,36 +1475,59 @@ export default function Page() {
             return;
           }
           if (state === 'exposure') {
+            updateScanDebugReason('waiting for camera: frame brightness outside allowed range');
             setStatus('ปรับแสงให้พอดี');
             setSubStatus('ขยับวัตถุให้อยู่ในบริเวณที่มีแสง');
             return;
           }
           if (state === 'unclear') {
+            updateScanDebugReason('waiting for object: frame is too blurry');
             setStatus('ภาพยังไม่ชัด');
             setSubStatus('เช็ดเลนส์และขยับวัตถุให้เห็นชัดขึ้น');
             return;
           }
+          if (state === 'moving') updateScanDebugReason('waiting for stable frame: object or camera is moving');
           setStatus('กำลังรอภาพนิ่ง');
           setSubStatus('จัดวัตถุให้อยู่กลางภาพและถือให้นิ่ง');
         },
       });
 
-      if (readiness.cancelled || cancelled || !mountedRef.current) return;
+      if (readiness.cancelled || cancelled || !mountedRef.current) {
+        updateScanDebugReason('capture blocked: camera readiness wait cancelled');
+        traceCameraTiming('capture readiness wait cancelled', {
+          readinessCancelled: readiness.cancelled,
+          effectCancelled: cancelled,
+          mounted: mountedRef.current,
+        });
+        return;
+      }
       if (!readiness.ready) {
+        updateScanDebugReason('waiting for camera: stable frame not available');
         retryUntilVideoReady();
         return;
       }
 
       traceScanEvent('stable camera frame ready', scanOperationIdRef.current + 1, {
         stableForMs: readiness.stableForMs,
+        detectionWaitMs: readiness.waitDurationMs,
       });
+      traceCameraTiming('capture eligibility reached', {
+        stableForMs: readiness.stableForMs,
+        detectionWaitMs: readiness.waitDurationMs,
+        changedPixelRatio: readiness.changedPixelRatio === null ? null : Number(readiness.changedPixelRatio.toFixed(3)),
+      });
+      updateScanDebugReason('capture eligible: capturing frame');
       console.log('[Camera] Camera frame is clear and stable; sending it to the classifier');
       setSubStatus('จับภาพวัตถุ…');
-      captureAndScan();
+      captureAndScan({ trigger: 'object_present_and_stable_frame' });
     };
 
-    if (cameraStatus === 'ready') setStatus('กำลังเตรียมภาพ…');
-    retryTimer = setTimeout(prepareCapture, CAPTURE_START_DELAY_MS);
+    setStatus('กำลังตรวจจับขยะ...');
+    setSubStatus('ถือขยะให้นิ่งในบริเวณกล้อง');
+    traceCameraTiming('capture preparation queued', { delayMs: 0 });
+    retryTimer = setTimeout(() => {
+      prepareCapture();
+    }, 0);
     cameraRetryTimerRef.current = retryTimer;
 
     return () => {
@@ -1182,7 +1610,13 @@ export default function Page() {
                   className="tt-captured-image"
                   src={capturedImage}
                   alt="ภาพขยะที่ถ่ายแล้ว"
-                  onLoad={() => setCapturedImageLoaded(true)}
+                  onLoad={(event) => {
+                    setCapturedImageLoaded(true);
+                    traceScanEvent('captured preview displayed', activeScanRef.current?.id || scanOperationIdRef.current, {
+                      width: event.currentTarget.naturalWidth,
+                      height: event.currentTarget.naturalHeight,
+                    });
+                  }}
                 />
               )}
 

@@ -4,6 +4,7 @@ import { mockWasteResults } from '../data/mockData.js';
 import { createProxyApiErrorEnvelope } from './proxyError.js';
 import { getAuthoritativeBin } from './resultPresentation.js';
 import { getRemainingResultSeconds, shouldResetResult } from './resultFlow.js';
+import { getPreparationStepText } from './preparationGuidance.js';
 import { getSafeThaiItemName, normalizeClassificationResponse } from './wasteClassification.js';
 
 const expectedBins = new Map([
@@ -55,6 +56,10 @@ test('confirmed preparation uses an unnumbered shared point then the backend bin
   );
   assert.equal(normalized.preparation.shared_disposal_destination.bin_id, null);
   assert.equal(normalized.preparation.shared_disposal_destination.bin_number, null);
+  assert.equal(
+    getPreparationStepText(normalized.preparation.steps[0], 'เทเศษอาหาร'),
+    'เทเศษอาหารที่เหลือที่จุดแยกที่กำหนด',
+  );
   assert.equal(normalized.preparation.steps[1].destination.bin_number, 3);
   assert.equal(normalized.preparation.steps[1].destination.bin_name, 'พลาสติก');
   assert.match(normalized.preparation.limitation_th, /เทเศษอาหาร/);
@@ -151,6 +156,51 @@ test('food and liquid preparation destinations use the mapped bin', () => {
   assert.equal(normalized.prediction.hasLiquid, true);
   assert.equal(normalized.preparation.steps[1].destination.bin_number, normalized.mappedBin.number);
   assert.equal(normalized.preparation.steps[1].destination.bin_name, normalized.mappedBin.nameTh);
+});
+
+test('liquid-only preparation displays the backend liquid instruction', () => {
+  const fixture = mockWasteResults.find((item) => item.request_id === 'mock-ict-b03');
+  const liquidInstruction = 'เทของเหลวที่เหลือที่จุดแยกที่กำหนด';
+  const liquidResponse = {
+    ...fixture,
+    prediction: {
+      ...fixture.prediction,
+      has_food_scraps: false,
+      hasFoodScraps: false,
+      has_liquid: true,
+      hasLiquid: true,
+    },
+    disposal: {
+      ...fixture.disposal,
+      has_food_scraps: false,
+      hasFoodScraps: false,
+      has_liquid: true,
+      hasLiquid: true,
+    },
+    preparation: {
+      ...fixture.preparation,
+      steps: [
+        { ...fixture.preparation.steps[0], action_th: 'แยกของเหลว', instruction_th: liquidInstruction },
+        {
+          ...fixture.preparation.steps[1],
+          action_th: 'ทิ้งภาชนะ',
+          instruction_th: 'นำภาชนะไปทิ้งตามถังที่แนะนำ',
+        },
+      ],
+    },
+  };
+  const normalized = normalizeClassificationResponse(liquidResponse);
+
+  assert.equal(normalized.prediction.has_food_scraps, false);
+  assert.equal(normalized.prediction.has_liquid, true);
+  assert.equal(
+    getPreparationStepText(normalized.preparation.steps[0], 'เทเศษอาหาร'),
+    liquidInstruction,
+  );
+  assert.equal(
+    getPreparationStepText(normalized.preparation.steps[1], 'นำภาชนะไปทิ้งที่ถังนี้'),
+    'นำภาชนะไปทิ้งตามถังที่แนะนำ',
+  );
 });
 
 test('glass preparation keeps bin five from the authoritative response', () => {

@@ -5,6 +5,15 @@ FastAPI inference endpoint. The model identifies waste and validated signals;
 the backend maps that classification to the location's physical bin master.
 The model is never the source of bin identity or display name.
 
+Qwen returns the visible object/material, `waste_category`, `material_subtype`,
+`resin_identification_code`, confidence, visible condition,
+food/liquid signals, and exactly three ranked `top_candidates` when the model
+provides a complete response. Resin code values
+are the strings `1`–`7` or `unknown`; a missing/invalid value normalizes to
+`unknown`. It must not return a physical bin number, name, ID, or disposal
+decision. The backend resolves all physical-bin fields from the active
+location's ordered rulebook.
+
 ## Request
 
 ```http
@@ -21,6 +30,29 @@ file: image file
 The backend uses the static `ECOCAICLE_LOCATION_ID` deployment setting. No
 client-supplied location is accepted or trusted.
 
+Qwen's classification JSON requires `object_name_th`, `waste_category`,
+`material_subtype`, `resin_identification_code`, `visible_condition`,
+`confidence`, `top_candidates` (exactly three), `has_food_scraps`, and
+`has_liquid`. The resin code is one of the strings `1` through `7` or `unknown`;
+missing or invalid values normalize to `unknown`. Material subtypes are
+`pet_bottle`, `stretch_plastic`, `rigid_plastic`, `multilayer_packaging`,
+`plastic_straw`, `plastic_spoon`, `paper`, `cardboard`, `glass`, `metal`, `e_waste`, `hazardous`, `infectious`,
+`general`, and `unknown`. `visible_condition` is one of `clean_dry`,
+`food_or_liquid_contaminated`, or `unknown`. Each candidate carries its name,
+category, subtype, and confidence. Bin or disposal fields from the model are
+ignored. The active prompt version is returned at the response root and in
+`prediction.prompt_version`, persisted in inference records, and exposed in Scan
+History. The default is `qwen-waste-classification-v5`.
+
+Each candidate contains `object_name_th`, `waste_category`,
+`material_subtype`, and confidence from 0 to 1. Candidate 1 is normalized to
+match the primary prediction exactly. Candidates 2 and 3 are plausible visible
+alternatives ranked by non-increasing confidence. A response with fewer than
+three usable candidates keeps its primary prediction, returns available
+candidates, and emits a structured `top_candidates_incomplete` diagnostic; it
+does not trigger a retry or make the scan an API error. Physical-bin mapping
+always uses the primary prediction only.
+
 ## Successful response
 
 The existing fields remain present:
@@ -36,20 +68,34 @@ The response additionally contains a canonical `mappedBin` object. Legacy
 ```json
 {
   "request_id": "uuid",
+  "prompt_version": "qwen-waste-classification-v5",
   "location_id": "ICT-001",
   "prediction": {
+    "object_name_th": "กระดาษทิชชู่ใช้แล้ว",
+    "waste_category": "paper",
+    "material_subtype": "paper",
+    "resin_identification_code": "unknown",
+    "visible_condition": "clean_dry",
+    "prompt_version": "qwen-waste-classification-v5",
+    "top_candidates": [
+      { "object_name_th": "กระดาษทิชชู่ใช้แล้ว", "waste_category": "paper", "material_subtype": "paper", "confidence": 0.9 },
+      { "object_name_th": "กระดาษ", "waste_category": "paper", "material_subtype": "cardboard", "confidence": 0.4 },
+      { "object_name_th": "กระดาษทิชชู่ใช้แล้ว", "waste_category": "unknown", "material_subtype": "unknown", "confidence": 0.2 }
+    ],
     "wasteType": "paper",
     "itemNameTh": "กระดาษทิชชู่ใช้แล้ว",
     "hasFoodScraps": false,
     "hasLiquid": false,
-    "confidence": 0.9
+    "confidence": 0.9,
+    "has_food_scraps": false,
+    "has_liquid": false
   },
   "mappedBin": {
     "id": "ICT-001-B04",
     "number": 4,
     "nameTh": "กระดาษ",
     "wasteType": "paper",
-    "mappingVersion": "ICT-10-bin-v2",
+    "mappingVersion": "ICT-10-bin-v3",
     "fallback": false
   },
   "mappingDecision": {
@@ -59,7 +105,8 @@ The response additionally contains a canonical `mappedBin` object. Legacy
     "binName": "กระดาษ",
     "mappingFallback": false,
     "classificationStatus": "confirmed",
-    "mappingKeyUsed": "paper"
+    "mappingKeyUsed": "paper",
+    "mappingReason": "clean_dry_recyclable_material"
   },
   "classificationStatus": "confirmed",
   "rawCategory": "paper",
@@ -70,21 +117,155 @@ The response additionally contains a canonical `mappedBin` object. Legacy
   "bin_id": "ICT-001-B04",
   "bin_number": 4,
   "bin_name": "กระดาษ",
-  "mapping_version": "ICT-10-bin-v2",
+  "mapping_version": "ICT-10-bin-v3",
   "classification_status": "confirmed",
   "mapping_fallback": false,
+  "mapping_reason": "clean_dry_recyclable_material",
+  "material_subtype": "paper",
+  "resin_identification_code": "unknown",
+  "visible_condition": "clean_dry",
+  "confidence": 0.9,
+  "top_candidates": [
+    { "object_name_th": "กระดาษทิชชู่ใช้แล้ว", "waste_category": "paper", "material_subtype": "paper", "confidence": 0.9 },
+    { "object_name_th": "กระดาษ", "waste_category": "paper", "material_subtype": "cardboard", "confidence": 0.4 },
+    { "object_name_th": "กระดาษทิชชู่ใช้แล้ว", "waste_category": "unknown", "material_subtype": "unknown", "confidence": 0.2 }
+  ],
+  "review_flags": {
+    "glass_pet_review_required": false,
+    "glass_pet_candidates_present": false,
+    "glass_pet_confidence_gap": null,
+    "glass_pet_confidence_close": false,
+    "glass_pet_review_reason": null
+  },
   "status": "success"
 }
 ```
 
 Unknown, below-threshold, or unmapped classifications use the configured
 organization fallback. For ICT-001 this is bin 1, `ขยะทั่วไป (ขยะฝังกลบ)`,
-with `mappedBin.fallback` set to `true`.
+with `mappedBin.fallback` set to `true`. Every successful mapping response and
+inference record includes `classification_status`, `mapping_fallback`, and a
+non-null `mapping_reason`; API errors use `mapping_not_resolved`.
 
-Phone object names such as `โทรศัพท์มือถือ`, `สมาร์ตโฟน`, `mobile phone`, and
-`cell phone` normalize to `ewaste` before bin lookup. A confidently identified
-phone therefore maps to the configured e-waste bin even when the model's
-category is missing or `unknown`.
+## ICT-001 ordered physical-bin rulebook
+
+The backend applies the ordered rules in `mapping_rulebook.ordered_rules`:
+
+1. `infectious` → bin 10.
+2. `hazardous` → bin 9.
+3. `ewaste` → bin 7.
+4. Clean, dry recyclables map by `material_subtype`: `pet_bottle` → 2,
+   `stretch_plastic` → 3, `paper`/`cardboard` → 4, `glass` → 5, and `metal` → 6.
+5. Clean, dry `plastic` items with `material_subtype: "plastic_straw"` or
+   `"plastic_spoon"` map to bin 8 with subtype-specific reasons
+   `clean_dry_plastic_straw_rdf` and `clean_dry_plastic_spoon_rdf`.
+   Contaminated items do not match this rule. Other configured RDF materials
+   continue to use their explicit allowlist.
+6. Unmatched, unsupported, unknown-condition, and invalidly contaminated items
+   use bin 1.
+
+`rigid_plastic` is prohibited from the ICT-001 RDF subtype allowlist and does
+not map to bin 8. Food/liquid-contaminated straws and spoons do not match the
+clean/dry RDF rule; with no supported item-specific preparation rule they
+follow the existing safe fallback.
+
+When a beverage-bottle object name is present with validated resin code `1`,
+the backend normalizes its category and subtype to `pet_bottle`; a generic
+container name alone is insufficient. A contradictory `pet_bottle` category
+with `rigid_plastic` subtype is normalized to `plastic`/`rigid_plastic`. The
+existing confidence threshold still applies. The global physical-bin mapping
+remains `pet_bottle` → Bin 2.
+
+For a location with `mapping_rulebook`, `/predict` does not use the legacy
+`category_mapping` shortcut. That field remains for older review/reference
+consumers; the rulebook is authoritative for inference responses.
+
+`plastic` alone never selects bin 3. `rigid_plastic` and
+`multilayer_packaging` do not map to bin 3. A recyclable object with visible
+food/liquid contamination receives the configured preparation flow first; a
+material destination is returned only when that flow is enabled for the
+category and the subtype has a valid rule. `visible_condition: "unknown"` is
+never treated as clean and dry.
+
+The repository has no ICT-001 bin-8 sticker image or verified accepted-material
+list. Therefore the live RDF rule currently has empty
+`eligible_material_subtypes` and `eligible_object_names_th` lists and safely
+falls back to bin 1. Add RDF items only after confirming the physical sticker.
+
+The infectious low-confidence rule is location-configured and exact-name based.
+For ICT-001, configured aliases such as `หน้ากากอนามัย`, `ชุดตรวจ ATK`,
+`ชุดตรวจโควิด`, and `ชุดตรวจวินิจฉัย` can normalize the category to
+`infectious`; the safety mapping can apply from confidence 0.50 to below 0.70.
+No phone or glove category is inferred from an object name. `ถุงมือยางใช้แล้ว`
+is included only because it is explicitly present in the ICT-001 allowlist;
+`ถุงมือยาง` is not.
+
+ICT-001 keeps the global `classification_policy.confidence_threshold` at
+`0.70`. Its optional `classification_policy.infectious_low_confidence_override`
+rule uses a `0.50` threshold and an exact normalized Thai object-name allowlist.
+When the normalized category is exactly `infectious`, confidence is at least
+`0.50` and below `0.70`, and `object_name_th` is on that allowlist, the backend
+maps through the first configured infectious rule (ICT-001 bin 10).
+The response keeps `classification_status: "low_confidence"` and the legacy
+`status: "unknown"`, with `mapping_fallback: false`; it adds
+`mapping_reason: "infectious_safety_override"` so clients can distinguish this
+policy route from both fallback and ordinary confirmed mappings. Other names,
+categories, and confidence values continue through normal threshold handling.
+
+For example, `ชุดตรวจวินิจฉัย` at confidence `0.60` returns these mapping
+fields (other response fields remain as documented above):
+
+```json
+{
+  "bin_id": "ICT-001-B10",
+  "bin_number": 10,
+  "bin_name": "ขยะติดเชื้อ",
+  "classification_status": "low_confidence",
+  "mapping_fallback": false,
+  "mapping_reason": "infectious_safety_override",
+  "status": "unknown",
+  "mappingDecision": {
+    "normalizedWasteType": "infectious",
+    "binNumber": 10,
+    "mappingFallback": false,
+    "classificationStatus": "low_confidence",
+    "mappingKeyUsed": "infectious",
+    "mappingReason": "infectious_safety_override"
+  }
+}
+```
+
+ICT-001 rule shape:
+
+```json
+{
+  "infectious_low_confidence_override": {
+    "enabled": true,
+    "waste_category": "infectious",
+    "confidence_threshold": 0.5,
+    "object_name_th_allowlist": [
+      "หน้ากากอนามัย", "หน้ากากทางการแพทย์", "หน้ากากใช้แล้ว",
+      "หน้ากากใช้ครั้งเดียว", "ชุดตรวจวินิจฉัย", "ชุดตรวจ ATK",
+      "ชุดตรวจโควิด", "ชุดตรวจโควิด-19", "ชุดตรวจ ATK โควิด",
+      "ชุดตรวจแอนติเจน", "ชุดตรวจเร็ว ATK", "ถุงมือยางใช้แล้ว"
+    ],
+    "mapping_reason": "infectious_safety_override"
+  }
+}
+```
+
+Object names are matched exactly after Unicode NFC normalization, case-folding,
+and whitespace normalization; the backend does not use substring matching for
+this override.
+The same `mapping_reason` is returned at the response top level and under
+`mappingDecision.mappingReason`, persisted in the inference record, and
+included in Scan History metadata and its status chips.
+
+When the normalized candidates contain both `glass` and `pet_bottle`, the
+response and inference record include `review_flags.glass_pet_review_required`
+and the confidence gap. A gap of 0.15 or less is marked
+`glass_pet_confidence_close`; candidate evidence is retained with the mapped
+result for later review.
 
 `prediction.itemNameTh` is validated as Thai script before it is returned. If
 the model returns empty, malformed, or mixed-language text, the backend uses a
@@ -115,10 +296,11 @@ both aliases:
 ## Preparation response
 
 For ICT-001, `preparation` is returned for every classification response. It
-is required when `has_food_scraps` is true, the category is explicitly enabled
-by the location configuration, and the container mapping is confirmed. The UI
-uses the short food-preparation label and does not display the backend's
-longer system guidance text.
+is required when food scraps/liquid are signaled or `visible_condition` is
+`food_or_liquid_contaminated`, the category is explicitly enabled by the
+location configuration, and a valid material destination exists. The mapped
+container destination is the post-preparation destination. Unknown cleanliness
+does not qualify for a recyclable rule.
 
 Confirmed preparation example for a glass container:
 
@@ -144,7 +326,7 @@ Confirmed preparation example for a glass container:
       "bin_id": "ICT-001-B05",
       "bin_number": 5,
       "bin_name": "ขวดแก้ว",
-      "mapping_version": "ICT-10-bin-v2"
+      "mapping_version": "ICT-10-bin-v3"
     },
     "steps": [
       {
@@ -198,7 +380,7 @@ location-specific bin.
   "bin_id": "ICT-001-B01",
   "bin_number": 1,
   "bin_name": "ขยะทั่วไป (ขยะฝังกลบ)",
-  "mapping_version": "ICT-10-bin-v2",
+  "mapping_version": "ICT-10-bin-v3",
   "classification_status": "unknown",
   "mapping_fallback": true,
   "status": "unknown"
@@ -241,7 +423,7 @@ Model/API failures return HTTP 502 with a structured response:
   "bin_id": null,
   "bin_number": null,
   "bin_name": null,
-  "mapping_version": "ICT-10-bin-v2",
+  "mapping_version": "ICT-10-bin-v3",
   "classification_status": "api_error",
   "mapping_fallback": false,
   "status": "api_error",

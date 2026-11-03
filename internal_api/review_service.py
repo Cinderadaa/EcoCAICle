@@ -27,6 +27,7 @@ try:  # Package import for local development and test discovery.
     from .mapping_config import (
         SUPPORTED_WASTE_CATEGORIES,
         LocationMappingConfig,
+        normalize_material_subtype,
         normalize_waste_category,
     )
 except ImportError:  # Docker's ``uvicorn app:app`` working-directory import.
@@ -34,6 +35,7 @@ except ImportError:  # Docker's ``uvicorn app:app`` working-directory import.
     from mapping_config import (
         SUPPORTED_WASTE_CATEGORIES,
         LocationMappingConfig,
+        normalize_material_subtype,
         normalize_waste_category,
     )
 
@@ -161,6 +163,8 @@ class ReviewService:
     def _review_states(records: Sequence[Mapping[str, Any]]) -> Dict[str, ReviewState]:
         states: Dict[str, ReviewState] = {}
         for record in records:
+            if record.get("evaluation_scope") == "pilot":
+                continue
             request_id = record.get("request_id")
             if not isinstance(request_id, str) or not request_id:
                 continue
@@ -208,6 +212,11 @@ class ReviewService:
         normalized = normalize_review_category(category)
         if normalized == "unknown":
             return None
+        # Category-only review labels cannot distinguish stretch plastic from
+        # other plastic subtypes, so the compatibility shortcut is not an
+        # authoritative expected-bin mapping here.
+        if normalized == "plastic":
+            return None
         bin_id = self.mapping_config.category_mapping.get(normalized)
         if not bin_id:
             return None
@@ -250,6 +259,7 @@ class ReviewService:
             "image_available": image_available,
             "object_name_th": inference.get("object_name_th"),
             "waste_category": inference.get("waste_category"),
+            "resin_identification_code": inference.get("resin_identification_code", "unknown"),
             "confidence": inference.get("confidence"),
             "has_food_scraps": inference.get("has_food_scraps"),
             "bin_id": inference.get("bin_id"),
@@ -409,6 +419,244 @@ class ReviewService:
             "request_id": request_id,
             "annotation": record,
             "review": self._item(inference, self._review_states([record]).get(request_id))["review"],
+        }
+
+    @staticmethod
+    def _latest_pilot_annotations(records: Sequence[Mapping[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        latest: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            request_id = record.get("request_id")
+            if record.get("evaluation_scope") != "pilot" or not isinstance(request_id, str):
+                continue
+            current = latest.get(request_id)
+            raw_revision = record.get("revision", 0)
+            revision = raw_revision if isinstance(raw_revision, int) and not isinstance(raw_revision, bool) else 0
+            raw_current_revision = current.get("revision", 0) if current else -1
+            current_revision = raw_current_revision if isinstance(raw_current_revision, int) and not isinstance(raw_current_revision, bool) else -1
+            if current is None or (
+                revision >= current_revision
+            ):
+                latest[request_id] = dict(record)
+        return latest
+
+    def pilot_evaluation(self, request_id: str) -> Dict[str, Any]:
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise ReviewValidationError("request_id must be a non-empty string")
+        inferences, _ = self._inference_records()
+        inference = next((row for row in inferences if row.get("request_id") == request_id), None)
+        if inference is None:
+            raise ReviewNotFoundError("No inference record exists for this request_id")
+        annotations, _ = self._annotation_records()
+        evaluation = self._latest_pilot_annotations(annotations).get(request_id)
+        configured_bins = [
+            {"number": definition.bin_number, "name": definition.bin_name}
+            for definition in self.mapping_config.bins.values()
+            if definition.enabled
+        ]
+        configured_bins.sort(key=lambda item: item["number"])
+        return {"request_id": request_id, "evaluation": evaluation, "configured_bins": configured_bins}
+
+    def submit_pilot_evaluation(self, request_id: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise ReviewValidationError("request_id must be a non-empty string")
+        if not isinstance(payload, Mapping):
+            raise ReviewValidationError("Request body must be an object")
+
+        valid_capture = payload.get("valid_capture")
+        if not isinstance(valid_capture, bool):
+            raise ReviewValidationError("valid_capture must be a boolean")
+        expected_revision = payload.get("expected_revision", 0)
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+            raise ReviewValidationError("expected_revision must be a non-negative integer")
+        note = payload.get("note")
+        if note is not None and not isinstance(note, str):
+            raise ReviewValidationError("note must be a string or null")
+        note = note.strip() if isinstance(note, str) else None
+        if note and len(note) > 2000:
+            raise ReviewValidationError("note must not exceed 2000 characters")
+
+        category: Optional[str] = None
+        subtype: Optional[str] = None
+        expected_bin_number: Optional[int] = None
+        if valid_capture:
+            category = normalize_review_category(payload.get("expected_waste_category"))
+            raw_subtype = payload.get("expected_material_subtype")
+            if raw_subtype not in (None, ""):
+                if not isinstance(raw_subtype, str):
+                    raise ReviewValidationError("expected_material_subtype must be a string or null")
+                subtype = normalize_material_subtype(raw_subtype)
+                if subtype == "unknown":
+                    raise ReviewValidationError("Unsupported material subtype", material_subtype=raw_subtype)
+            raw_bin = payload.get("expected_bin_number")
+            if raw_bin not in (None, ""):
+                if isinstance(raw_bin, bool):
+                    raise ReviewValidationError("expected_bin_number must be a configured bin number")
+                try:
+                    expected_bin_number = int(raw_bin)
+                except (TypeError, ValueError):
+                    raise ReviewValidationError("expected_bin_number must be a configured bin number") from None
+                configured_bins = {
+                    definition.bin_number
+                    for definition in self.mapping_config.bins.values()
+                    if definition.enabled
+                }
+                if expected_bin_number not in configured_bins:
+                    raise ReviewValidationError("expected_bin_number must be a configured bin number")
+            if category != "unknown" and expected_bin_number is None:
+                raise ReviewValidationError("expected_bin_number is required for a valid capture")
+        elif any(payload.get(key) not in (None, "") for key in (
+            "expected_waste_category", "expected_material_subtype", "expected_bin_number",
+        )):
+            raise ReviewValidationError("Ground-truth fields must be empty for an invalid capture")
+
+        inferences, _ = self._inference_records()
+        inference = next((row for row in inferences if row.get("request_id") == request_id), None)
+        if inference is None:
+            raise ReviewNotFoundError("No inference record exists for this request_id")
+        if valid_capture:
+            image_id = inference.get("image_id") or inference.get("image_path")
+            image_path = self._safe_image_path(image_id)
+            if image_path is None or not image_path.is_file():
+                raise ReviewConflictError("A valid capture requires an available image", conflict="missing_image")
+
+        try:
+            self.storage.initialize()
+        except StorageFailure as exc:
+            raise ReviewUnavailableError("Pilot evaluations cannot be stored", error_type=type(exc).__name__) from exc
+
+        with self._exclusive_annotation_lock():
+            annotations, _ = self._annotation_records()
+            latest = self._latest_pilot_annotations(annotations)
+            previous = latest.get(request_id)
+            revision = previous.get("revision", 0) if previous else 0
+            if expected_revision != revision:
+                raise ReviewConflictError(
+                    "The pilot evaluation changed; reload before submitting",
+                    conflict="revision_conflict",
+                    current_revision=revision,
+                )
+            timestamp = _utc_timestamp()
+            image_id = inference.get("image_id") or inference.get("image_path")
+            record = {
+                "request_id": request_id,
+                "image_id": image_id,
+                "image_path": image_id,
+                "revision": revision + 1,
+                "reviewer_id": "pilot.tester",
+                "reviewed_at": timestamp,
+                "recorded_at": timestamp,
+                "review_action": "pilot_evaluation",
+                "review_status": "pilot_evaluated",
+                "is_final": True,
+                "evaluation_scope": "pilot",
+                "valid_capture": valid_capture,
+                "ground_truth_waste_category": category,
+                "expected_waste_category": category,
+                "expected_material_subtype": subtype,
+                "expected_bin_number": expected_bin_number,
+                "note": note,
+            }
+            try:
+                self.storage.append_ground_truth_annotation(record)
+            except StorageFailure as exc:
+                raise ReviewUnavailableError(
+                    "Pilot evaluation could not be stored",
+                    error_type=type(exc).__name__,
+                ) from exc
+        return {"request_id": request_id, "evaluation": record}
+
+    def pilot_metrics(self) -> Dict[str, Any]:
+        inferences, malformed_inferences = self._inference_records()
+        annotations, malformed_annotations = self._annotation_records()
+        latest = self._latest_pilot_annotations(annotations)
+        by_request_id = {str(row.get("request_id")): row for row in inferences}
+        samples = [
+            (by_request_id[request_id], evaluation)
+            for request_id, evaluation in latest.items()
+            if request_id in by_request_id
+        ]
+        invalid_captures = sum(evaluation.get("valid_capture") is False for _, evaluation in samples)
+        valid_samples = [(inference, evaluation) for inference, evaluation in samples if evaluation.get("valid_capture") is True]
+        api_errors = [(inference, evaluation) for inference, evaluation in samples if inference.get("status") == "api_error"]
+        timeouts = [
+            (inference, evaluation) for inference, evaluation in api_errors
+            if "timeout" in str(inference.get("error_type") or "").lower()
+        ]
+        completed = [
+            (inference, evaluation) for inference, evaluation in valid_samples
+            if inference.get("status") in {"success", "unknown", "missing_mapping"}
+        ]
+        class_scored = [
+            (inference, evaluation) for inference, evaluation in completed
+            if evaluation.get("expected_waste_category") is not None
+        ]
+        class_correct = sum(
+            _canonical_prediction(inference.get("waste_category")) == evaluation.get("expected_waste_category")
+            for inference, evaluation in class_scored
+        )
+        bin_scored = [
+            (inference, evaluation) for inference, evaluation in completed
+            if isinstance(evaluation.get("expected_bin_number"), int)
+            and not isinstance(evaluation.get("expected_bin_number"), bool)
+        ]
+        bin_correct = sum(inference.get("bin_number") == evaluation.get("expected_bin_number") for inference, evaluation in bin_scored)
+        subtype_scored = [
+            (inference, evaluation) for inference, evaluation in completed
+            if evaluation.get("expected_material_subtype") is not None
+        ]
+        subtype_correct = sum(inference.get("material_subtype") == evaluation.get("expected_material_subtype") for inference, evaluation in subtype_scored)
+        threshold = self.mapping_config.confidence_threshold
+        confidence_samples = [
+            inference.get("confidence") for inference, _ in completed
+            if isinstance(inference.get("confidence"), (int, float))
+            and not isinstance(inference.get("confidence"), bool)
+        ]
+        latencies = _numeric_values(inference.get("inference_latency_ms") for inference, _ in completed)
+        return {
+            "evaluation_scope": "pilot",
+            "threshold": threshold,
+            "configured_bins": [
+                {"number": definition.bin_number, "name": definition.bin_name}
+                for definition in sorted(self.mapping_config.bins.values(), key=lambda item: item.bin_number)
+                if definition.enabled
+            ],
+            "attempted_scans": len(samples),
+            "invalid_captures": invalid_captures,
+            "valid_captures": len(valid_samples),
+            "completed_predictions": len(completed),
+            "valid_capture_completion_rate": _ratio(len(completed), len(valid_samples)),
+            "classification_accuracy": {
+                "value": _ratio(class_correct, len(class_scored)),
+                "correct": class_correct,
+                "eligible_samples": len(class_scored),
+            },
+            "bin_accuracy": {
+                "value": _ratio(bin_correct, len(bin_scored)),
+                "correct": bin_correct,
+                "eligible_samples": len(bin_scored),
+            },
+            "subtype_accuracy": {
+                "value": _ratio(subtype_correct, len(subtype_scored)),
+                "correct": subtype_correct,
+                "eligible_samples": len(subtype_scored),
+            },
+            "timeout_count": len(timeouts),
+            "api_error_count": len(api_errors),
+            "classification_error_count": len(class_scored) - class_correct,
+            "confidence_breakdown": {
+                "at_or_above_threshold": sum(value >= threshold for value in confidence_samples),
+                "below_threshold": sum(value < threshold for value in confidence_samples),
+                "threshold": threshold,
+            },
+            "completed_inference_latency_ms": {
+                "count": len(latencies),
+                "median": _percentile(latencies, 0.5),
+                "p95": _percentile(latencies, 0.95),
+            },
+            "data_quality": {
+                "malformed_inference_records": malformed_inferences,
+                "malformed_annotation_records": malformed_annotations,
+            },
         }
 
     def metrics(self) -> Dict[str, Any]:

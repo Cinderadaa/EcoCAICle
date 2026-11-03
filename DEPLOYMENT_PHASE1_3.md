@@ -29,43 +29,29 @@ The frontend runtime should also receive `ECOCAICLE_LOCATION_ID=ICT-001` so
 proxy-generated `api_error` envelopes use the same static location metadata.
 Successful responses still use the backend-provided location ID.
 
-## Observed container topology
+## Port configuration
 
-Read-only inspection on 2026-10-21 found:
+Use **port 3002 as the single browser-facing app port** for the kiosk,
+Scan History, and reviewer pages. Browser requests to `/api/...` stay on this
+same origin and Next.js proxies them to FastAPI.
 
-- `ecocaicle-frontend` is attached to Docker network `nginx-proxy`.
-- Its configured `MODEL_BASE_URL` is
-  `http://host.docker.internal:8000`.
-- `host.docker.internal` resolves from the frontend container and port 8000
-  responds to `/health`.
-- The service currently answering port 8000 identifies as `Image
-  Classification API`; its OpenAPI `PredictResponse` contains only
-  `label`, `confidence`, and `source`.
-- No Phase 1–3 `internal_api` container was present in the inspected container
-  set.
-
-The current port 8000 target is therefore reachable but is not the Phase 2
-mapping contract. It must not be used for a Phase 1–3 deployment.
-
-## Required target configuration
-
-The repository's FastAPI Dockerfile exposes port 8001. Under the current
-host-gateway topology, the expected frontend runtime setting is:
+FastAPI listens on port 8001 for internal proxy traffic. Do not publish that
+backend port as a user-facing entry point. If frontend and backend run in
+separate containers, connect them on a private Docker network and use the
+backend service name below:
 
 ```text
-MODEL_BASE_URL=http://host.docker.internal:8001
+MODEL_BASE_URL=http://<internal-api-service>:8001
 ```
 
-This URL is conditional on the new `internal_api` container being published
-on host port 8001. If the backend is instead attached to the same Docker
-network, use its approved service DNS name and port, for example:
+For local processes on the same machine, use:
 
 ```text
-MODEL_BASE_URL=http://<approved-internal-api-service>:8001
+MODEL_BASE_URL=http://127.0.0.1:8001
 ```
 
-The service name must be supplied by the deployment administrator; no service
-name is assumed by this repository.
+The backend address is consumed only by server-side Next.js proxy routes; users
+open `http://localhost:3002`.
 
 ## Staged deployment procedure
 
@@ -90,8 +76,9 @@ name is assumed by this repository.
      `bin_id`, `bin_number`, `bin_name`, `mapping_version`,
      `classification_status`, `mapping_fallback`, and `status`.
 
-6. Set the frontend runtime `MODEL_BASE_URL` to the verified Phase 1–3
-   backend URL and perform the approved frontend restart.
+6. Set the frontend runtime `MODEL_BASE_URL` to the private verified backend
+   address and restart the frontend. Publish only the frontend's browser port,
+   3002.
 7. Run end-to-end smoke tests with a controlled test image/model response:
 
    - one confirmed prediction for each ICT bin 1–10;
@@ -124,11 +111,8 @@ name is assumed by this repository.
 
 ## Remaining blockers
 
-- The currently configured port 8000 service is an older API and does not
-  expose the Phase 1–3 response contract.
 - The Phase 1–3 FastAPI container is not currently running in the inspected
   environment.
-- The correct replacement `MODEL_BASE_URL` cannot be activated without an
-  administrator-approved backend deployment/binding on port 8001 or an
-  approved service DNS name.
+- The private backend service address must be configured before prediction
+  routes can reach FastAPI.
 - A live browser smoke test has not been run in this review.

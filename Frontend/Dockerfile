@@ -22,7 +22,7 @@ RUN pnpm prune --prod
 FROM base AS runner
 
 ENV NODE_ENV=production
-ENV PORT=3000
+ENV PORT=3002
 ENV HOSTNAME=0.0.0.0
 
 COPY --from=builder --chown=node:node /app/public ./public
@@ -32,6 +32,6 @@ COPY --from=builder --chown=node:node /app/package.json ./package.json
 
 USER node
 
-EXPOSE 3000
+EXPOSE 3002
 
-CMD ["pnpm", "exec", "next", "start", "--hostname", "0.0.0.0", "--port", "3000"]
+CMD ["pnpm", "exec", "next", "start", "--hostname", "0.0.0.0", "--port", "3002"]

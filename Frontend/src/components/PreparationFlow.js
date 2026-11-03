@@ -1,5 +1,6 @@
 import React from 'react';
 import BinSticker from '@/components/BinSticker';
+import { getPreparationStepText } from '@/lib/preparationGuidance';
 
 /**
  * Render the dedicated two-step food preparation screen.
@@ -32,14 +33,18 @@ export default function PreparationFlow({
     return null;
   }
 
-  const firstAction = 'เทเศษอาหาร';
+  const firstStepText = getPreparationStepText(firstStep, 'เทเศษอาหาร');
+  const secondStepText = getPreparationStepText(
+    preparation.steps[1],
+    'นำภาชนะไปทิ้งที่ถังนี้',
+  );
 
   return (
     <section className="tt-food-flow__card" aria-label="ขั้นตอนการแยกก่อนทิ้ง">
       <div className="tt-food-flow__step">
         <span className="tt-food-flow__number" aria-hidden="true">1</span>
-        <strong>{firstAction}</strong>
-        <img className="tt-food-flow__food-icon" src={firstStep?.icon || "/เทไอคอน.png"} alt="ไอคอนเทเศษอาหาร" />
+        <strong>{firstStepText}</strong>
+        <img className="tt-food-flow__food-icon" src={firstStep?.icon || "/เทไอคอน.png"} alt={firstStepText} />
       </div>
 
       <img className="tt-food-flow__arrow" src="/ลูกศร.png" alt="แล้วจึง" />
@@ -51,7 +56,7 @@ export default function PreparationFlow({
           binName={containerDestination.bin_name}
         />
         <div className="tt-food-flow__bin-copy">
-          <span className="tt-food-flow__bin-instruction">นำภาชนะไปทิ้งที่ถังนี้</span>
+          <span className="tt-food-flow__bin-instruction">{secondStepText}</span>
           <p className="tt-food-flow__bin-name">{containerDestination.bin_name}</p>
         </div>
       </div>

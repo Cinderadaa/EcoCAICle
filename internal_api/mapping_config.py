@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -33,7 +34,38 @@ SUPPORTED_WASTE_CATEGORIES = frozenset(
         "unknown",
     }
 )
+SUPPORTED_MATERIAL_SUBTYPES = frozenset({
+    "pet_bottle",
+    "stretch_plastic",
+    "rigid_plastic",
+    "plastic_straw",
+    "plastic_spoon",
+    "multilayer_packaging",
+    "snack_sachet",
+    "coffee_sachet",
+    "refill_pouch",
+    "non_recyclable_foam",
+    "plastic_coated_paper",
+    "non_recyclable_dry_plastic",
+    "paper",
+    "cardboard",
+    "glass",
+    "metal",
+    "e_waste",
+    "hazardous",
+    "infectious",
+    "general",
+    "unknown",
+})
+SUPPORTED_VISIBLE_CONDITIONS = frozenset({
+    "clean_dry",
+    "food_or_liquid_contaminated",
+    "unknown",
+})
 MAPPABLE_WASTE_CATEGORIES = SUPPORTED_WASTE_CATEGORIES - {"unknown"}
+PREPARATION_WASTE_CATEGORIES = frozenset(
+    {"pet_bottle", "plastic", "paper", "glass", "metal"}
+)
 DEFAULT_LOCATION_ID = "ICT-001"
 DEFAULT_CONFIG_DIRECTORY = Path(__file__).resolve().parent / "config" / "locations"
 LOCATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
@@ -61,9 +93,11 @@ class LocationMappingConfig:
     confidence_threshold: float
     bins: Mapping[str, BinDefinition]
     category_mapping: Mapping[str, str]
+    mapping_rulebook: Mapping[str, Any]
     unknown_fallback_enabled: bool
     unknown_fallback_bin_id: Optional[str]
     unknown_fallback_statuses: frozenset[str]
+    infectious_low_confidence_override: Mapping[str, Any]
     food_contamination_flow: Mapping[str, Any]
     preparation: Mapping[str, Any]
 
@@ -72,28 +106,34 @@ def normalize_waste_category(value: object) -> str:
     """Return a canonical waste type; unsupported labels stay unknown."""
 
     normalized = " ".join(str(value or "").strip().lower().split())
+    if normalized == "e_waste":
+        normalized = "ewaste"
     return normalized if normalized in SUPPORTED_WASTE_CATEGORIES else "unknown"
 
 
-PHONE_OBJECT_NAME_ALIASES = (
-    "โทรศัพท์มือถือ",
-    "มือถือ",
-    "สมาร์ตโฟน",
-    "สมาร์ทโฟน",
-    "โทรศัพท์",
-    "mobile phone",
-    "smartphone",
-    "cell phone",
-)
+def normalize_material_subtype(value: object) -> str:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    if normalized == "ewaste":
+        normalized = "e_waste"
+    return normalized if normalized in SUPPORTED_MATERIAL_SUBTYPES else "unknown"
+
+
+def normalize_visible_condition(value: object) -> str:
+    normalized = " ".join(str(value or "").strip().lower().split())
+    return normalized if normalized in SUPPORTED_VISIBLE_CONDITIONS else "unknown"
+
+
+def normalize_object_name_th(value: object) -> str:
+    """Normalize Thai object-name casing and whitespace for exact allowlist checks."""
+
+    if not isinstance(value, str):
+        return ""
+    return unicodedata.normalize("NFC", " ".join(value.casefold().split()))
 
 
 def normalize_prediction_waste_type(category: object, item_name: object = None) -> str:
-    """Normalize a waste type, recognizing mobile phones as e-waste."""
+    """Normalize the model-selected category without deriving it from an object name."""
 
-    if isinstance(item_name, str):
-        normalized_name = " ".join(item_name.casefold().split())
-        if any(alias in normalized_name for alias in PHONE_OBJECT_NAME_ALIASES):
-            return "ewaste"
     return normalize_waste_category(category)
 
 
@@ -116,6 +156,209 @@ def _finite_number(value: object, field_name: str) -> float:
     if not math.isfinite(numeric_value):
         raise MappingConfigError(f"{field_name} must be finite")
     return numeric_value
+
+
+def _validate_infectious_low_confidence_override(
+    raw_rule: object,
+    *,
+    confidence_threshold: float,
+) -> Mapping[str, Any]:
+    if raw_rule is None:
+        return MappingProxyType({"enabled": False})
+    if not isinstance(raw_rule, Mapping):
+        raise MappingConfigError(
+            "classification_policy.infectious_low_confidence_override must be an object"
+        )
+
+    field_prefix = "classification_policy.infectious_low_confidence_override"
+    enabled = _boolean(raw_rule.get("enabled"), f"{field_prefix}.enabled")
+    waste_category = _non_empty_string(raw_rule.get("waste_category"), f"{field_prefix}.waste_category")
+    if waste_category != "infectious":
+        raise MappingConfigError(f"{field_prefix}.waste_category must be 'infectious'")
+    override_threshold = _finite_number(
+        raw_rule.get("confidence_threshold"),
+        f"{field_prefix}.confidence_threshold",
+    )
+    if not 0 <= override_threshold <= 1:
+        raise MappingConfigError(f"{field_prefix}.confidence_threshold must be between 0 and 1")
+    if override_threshold >= confidence_threshold:
+        raise MappingConfigError(
+            f"{field_prefix}.confidence_threshold must be below the global confidence threshold"
+        )
+
+    raw_names = raw_rule.get("object_name_th_allowlist")
+    if not isinstance(raw_names, list) or not raw_names:
+        raise MappingConfigError(f"{field_prefix}.object_name_th_allowlist must be a non-empty array")
+    allowlist: list[str] = []
+    for index, raw_name in enumerate(raw_names):
+        name = _non_empty_string(raw_name, f"{field_prefix}.object_name_th_allowlist[{index}]")
+        normalized_name = normalize_object_name_th(name)
+        if normalized_name in allowlist:
+            raise MappingConfigError(f"{field_prefix}.object_name_th_allowlist contains a duplicate name")
+        allowlist.append(normalized_name)
+
+    mapping_reason = _non_empty_string(raw_rule.get("mapping_reason"), f"{field_prefix}.mapping_reason")
+
+    return MappingProxyType({
+        "enabled": enabled,
+        "waste_category": waste_category,
+        "confidence_threshold": override_threshold,
+        "object_name_th_allowlist": tuple(allowlist),
+        "mapping_reason": mapping_reason,
+    })
+
+
+def _validate_mapping_rulebook(
+    raw_rulebook: object,
+    *,
+    bins: Mapping[str, BinDefinition],
+) -> Mapping[str, Any]:
+    if raw_rulebook is None:
+        # Compatibility for older non-ICT test/deployment configurations.
+        return MappingProxyType({"version": "legacy-category-map", "ordered_rules": ()})
+    if not isinstance(raw_rulebook, Mapping):
+        raise MappingConfigError("mapping_rulebook must be an object")
+    version = _non_empty_string(raw_rulebook.get("version"), "mapping_rulebook.version")
+    raw_rules = raw_rulebook.get("ordered_rules")
+    if not isinstance(raw_rules, list) or not raw_rules:
+        raise MappingConfigError("mapping_rulebook.ordered_rules must be a non-empty array")
+
+    expected_ids = ["infectious", "hazardous", "e_waste", "clean_recyclable_material", "rdf_fuel", "fallback"]
+    rules: list[dict[str, Any]] = []
+    for index, raw_rule in enumerate(raw_rules):
+        prefix = f"mapping_rulebook.ordered_rules[{index}]"
+        if not isinstance(raw_rule, Mapping):
+            raise MappingConfigError(f"{prefix} must be an object")
+        rule = dict(raw_rule)
+        rule_id = _non_empty_string(rule.get("id"), f"{prefix}.id")
+        if index >= len(expected_ids) or rule_id != expected_ids[index]:
+            raise MappingConfigError("mapping_rulebook rules are missing or out of priority order")
+        rule["mapping_reason"] = _non_empty_string(rule.get("mapping_reason"), f"{prefix}.mapping_reason")
+        if rule.get("bin_id") is not None:
+            bin_id = _non_empty_string(rule.get("bin_id"), f"{prefix}.bin_id")
+            if bin_id not in bins or not bins[bin_id].enabled:
+                raise MappingConfigError(f"{prefix}.bin_id must reference an enabled configured bin")
+            rule["bin_id"] = bin_id
+        elif rule_id != "clean_recyclable_material":
+            raise MappingConfigError(f"{prefix}.bin_id is required")
+
+        if "waste_categories" in rule:
+            categories = rule["waste_categories"]
+            if not isinstance(categories, list) or not categories:
+                raise MappingConfigError(f"{prefix}.waste_categories must be a non-empty array")
+            normalized_categories = [normalize_waste_category(value) for value in categories]
+            if "unknown" in normalized_categories or len(set(normalized_categories)) != len(normalized_categories):
+                raise MappingConfigError(f"{prefix}.waste_categories contains an invalid or duplicate category")
+            rule["waste_categories"] = normalized_categories
+
+        if "visible_conditions" in rule:
+            conditions = rule["visible_conditions"]
+            if not isinstance(conditions, list) or not conditions:
+                raise MappingConfigError(f"{prefix}.visible_conditions must be a non-empty array")
+            normalized_conditions = [normalize_visible_condition(value) for value in conditions]
+            if "unknown" in normalized_conditions or len(set(normalized_conditions)) != len(normalized_conditions):
+                raise MappingConfigError(f"{prefix}.visible_conditions contains an invalid or duplicate condition")
+            rule["visible_conditions"] = normalized_conditions
+
+        if "material_subtypes" in rule:
+            subtypes = rule["material_subtypes"]
+            if not isinstance(subtypes, list) or not subtypes:
+                raise MappingConfigError(f"{prefix}.material_subtypes must be a non-empty array")
+            normalized_subtypes = [normalize_material_subtype(value) for value in subtypes]
+            if "unknown" in normalized_subtypes or len(set(normalized_subtypes)) != len(normalized_subtypes):
+                raise MappingConfigError(f"{prefix}.material_subtypes contains an invalid or duplicate subtype")
+            rule["material_subtypes"] = normalized_subtypes
+
+        if "material_subtype_bins" in rule:
+            subtype_bins = rule["material_subtype_bins"]
+            if not isinstance(subtype_bins, Mapping) or not subtype_bins:
+                raise MappingConfigError(f"{prefix}.material_subtype_bins must be a non-empty object")
+            normalized_bins: dict[str, str] = {}
+            for raw_subtype, raw_bin_id in subtype_bins.items():
+                subtype = normalize_material_subtype(raw_subtype)
+                selected_bin = _non_empty_string(raw_bin_id, f"{prefix}.material_subtype_bins.{raw_subtype}")
+                if subtype == "unknown" or selected_bin not in bins or not bins[selected_bin].enabled:
+                    raise MappingConfigError(f"{prefix}.material_subtype_bins contains an invalid mapping")
+                normalized_bins[subtype] = selected_bin
+            rule["material_subtype_bins"] = normalized_bins
+
+        if "material_subtype_categories" in rule:
+            subtype_categories = rule["material_subtype_categories"]
+            if not isinstance(subtype_categories, Mapping):
+                raise MappingConfigError(f"{prefix}.material_subtype_categories must be an object")
+            normalized_map: dict[str, list[str]] = {}
+            for raw_subtype, categories in subtype_categories.items():
+                subtype = normalize_material_subtype(raw_subtype)
+                if subtype == "unknown" or not isinstance(categories, list) or not categories:
+                    raise MappingConfigError(f"{prefix}.material_subtype_categories contains an invalid entry")
+                normalized_categories = [normalize_waste_category(value) for value in categories]
+                if "unknown" in normalized_categories:
+                    raise MappingConfigError(f"{prefix}.material_subtype_categories contains an invalid category")
+                normalized_map[subtype] = normalized_categories
+            rule["material_subtype_categories"] = normalized_map
+
+        for list_key in ("eligible_material_subtypes", "eligible_object_names_th"):
+            if list_key in rule:
+                values = rule[list_key]
+                if not isinstance(values, list):
+                    raise MappingConfigError(f"{prefix}.{list_key} must be an array")
+                if list_key == "eligible_material_subtypes":
+                    normalized_values = [normalize_material_subtype(value) for value in values]
+                    if "unknown" in normalized_values or len(set(normalized_values)) != len(normalized_values):
+                        raise MappingConfigError(f"{prefix}.{list_key} contains an invalid or duplicate subtype")
+                    rule[list_key] = normalized_values
+                else:
+                    names = [normalize_object_name_th(_non_empty_string(value, f"{prefix}.{list_key}")) for value in values]
+                    if len(set(names)) != len(names):
+                        raise MappingConfigError(f"{prefix}.{list_key} contains duplicate names")
+                    rule[list_key] = names
+        if "requires_preparation_path_when_contaminated" in rule:
+            rule["requires_preparation_path_when_contaminated"] = _boolean(
+                rule["requires_preparation_path_when_contaminated"],
+                f"{prefix}.requires_preparation_path_when_contaminated",
+            )
+        if "preparation_mapping_reason" in rule:
+            rule["preparation_mapping_reason"] = _non_empty_string(
+                rule["preparation_mapping_reason"],
+                f"{prefix}.preparation_mapping_reason",
+            )
+        if "mapping_reasons" in rule:
+            reasons = rule["mapping_reasons"]
+            if not isinstance(reasons, Mapping):
+                raise MappingConfigError(f"{prefix}.mapping_reasons must be an object")
+            rule["mapping_reasons"] = {
+                _non_empty_string(key, f"{prefix}.mapping_reasons key"):
+                _non_empty_string(value, f"{prefix}.mapping_reasons.{key}")
+                for key, value in reasons.items()
+            }
+        if "mapping_reason_by_material_subtype" in rule:
+            reasons = rule["mapping_reason_by_material_subtype"]
+            if not isinstance(reasons, Mapping):
+                raise MappingConfigError(f"{prefix}.mapping_reason_by_material_subtype must be an object")
+            normalized_reasons: dict[str, str] = {}
+            for raw_subtype, raw_reason in reasons.items():
+                subtype = normalize_material_subtype(raw_subtype)
+                reason = _non_empty_string(raw_reason, f"{prefix}.mapping_reason_by_material_subtype.{raw_subtype}")
+                if subtype == "unknown" or subtype in normalized_reasons:
+                    raise MappingConfigError(f"{prefix}.mapping_reason_by_material_subtype contains an invalid or duplicate subtype")
+                normalized_reasons[subtype] = reason
+            eligible_subtypes = set(rule.get("eligible_material_subtypes", ()))
+            if not set(normalized_reasons).issubset(eligible_subtypes):
+                raise MappingConfigError(f"{prefix}.mapping_reason_by_material_subtype must target eligible material subtypes")
+            rule["mapping_reason_by_material_subtype"] = normalized_reasons
+        rules.append(rule)
+
+    if len(rules) != len(expected_ids) or rules[-1].get("id") != "fallback":
+        raise MappingConfigError("mapping_rulebook must define all required priority rules and a final fallback")
+    rdf_rule = rules[4]
+    forbidden_rdf_subtypes = {"pet_bottle", "stretch_plastic", "rigid_plastic", "paper", "cardboard", "glass", "metal", "e_waste", "hazardous", "infectious"}
+    if forbidden_rdf_subtypes.intersection(rdf_rule.get("eligible_material_subtypes", ())):
+        raise MappingConfigError("mapping_rulebook RDF rule includes a subtype reserved for another bin or excluded material")
+    rdf_categories = set(rdf_rule.get("waste_categories", ()))
+    if rdf_categories.intersection({"glass", "metal", "ewaste", "hazardous", "infectious", "general"}):
+        raise MappingConfigError("mapping_rulebook RDF rule includes a prohibited waste category")
+
+    return _freeze_value({"version": version, "ordered_rules": rules})
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -257,9 +500,9 @@ def _validate_preparation(
     normalized_categories: list[str] = []
     for index, raw_category in enumerate(raw_categories):
         category = normalize_waste_category(raw_category)
-        if category not in MAPPABLE_WASTE_CATEGORIES:
+        if category not in MAPPABLE_WASTE_CATEGORIES or category not in PREPARATION_WASTE_CATEGORIES:
             raise MappingConfigError(
-                "unsupported preparation trigger category at index "
+                "unsupported or non-recyclable preparation trigger category at index "
                 f"{index}: {raw_category}"
             )
         if category in normalized_categories:
@@ -375,6 +618,10 @@ def validate_location_config(
     )
     if not 0 <= confidence_threshold <= 1:
         raise MappingConfigError("classification_policy.confidence_threshold must be between 0 and 1")
+    infectious_low_confidence_override = _validate_infectious_low_confidence_override(
+        policy.get("infectious_low_confidence_override"),
+        confidence_threshold=confidence_threshold,
+    )
 
     fallback = policy.get("unknown_fallback")
     if not isinstance(fallback, Mapping):
@@ -482,6 +729,16 @@ def validate_location_config(
             )
         category_mapping[category] = bin_id
 
+    if infectious_low_confidence_override.get("enabled") and "infectious" not in category_mapping:
+        raise MappingConfigError(
+            "classification_policy.infectious_low_confidence_override requires a configured infectious category mapping"
+        )
+
+    mapping_rulebook = _validate_mapping_rulebook(
+        raw_config.get("mapping_rulebook"),
+        bins=bins,
+    )
+
     food_contamination_flow = _validate_food_contamination_flow(
         raw_config.get("food_contamination_flow"),
         bins,
@@ -495,9 +752,11 @@ def validate_location_config(
         confidence_threshold=confidence_threshold,
         bins=MappingProxyType(dict(bins)),
         category_mapping=MappingProxyType(dict(category_mapping)),
+        mapping_rulebook=mapping_rulebook,
         unknown_fallback_enabled=fallback_enabled,
         unknown_fallback_bin_id=fallback_bin_id,
         unknown_fallback_statuses=fallback_statuses,
+        infectious_low_confidence_override=infectious_low_confidence_override,
         food_contamination_flow=food_contamination_flow,
         preparation=preparation,
     )

@@ -1,6 +1,20 @@
 import React from 'react';
 import Image from 'next/image';
 
+const binMappings = [
+  { waste: 'ขยะทั่วไป', binNumber: 1, binName: 'ขยะทั่วไป (ขยะฝังกลบ)' },
+  { waste: 'ขวดเครื่องดื่มพลาสติก PET', binNumber: 2, binName: 'ขวดพลาสติก PET' },
+  { waste: 'พลาสติกชนิดอื่นที่ไม่ใช่ขวด PET', binNumber: 3, binName: 'พลาสติก' },
+  { waste: 'กระดาษ', binNumber: 4, binName: 'กระดาษ' },
+  { waste: 'ภาชนะแก้ว', binNumber: 5, binName: 'ขวดแก้ว' },
+  { waste: 'โลหะ', binNumber: 6, binName: 'กระป๋องอะลูมิเนียมและโลหะอื่น ๆ' },
+  { waste: 'ขยะอิเล็กทรอนิกส์', binNumber: 7, binName: 'ขยะอิเล็กทรอนิกส์' },
+  { waste: 'ขยะเชื้อเพลิง', binNumber: 8, binName: 'ขยะเชื้อเพลิง' },
+  { waste: 'ขยะอันตราย', binNumber: 9, binName: 'ขยะอันตราย' },
+  { waste: 'ขยะติดเชื้อ', binNumber: 10, binName: 'ขยะติดเชื้อ' },
+  { waste: 'ไม่สามารถระบุได้ / ความมั่นใจต่ำ', binNumber: 1, binName: 'ขยะทั่วไป (คำแนะนำสำรอง)' },
+];
+
 export default function Page() {
   return React.createElement(
     'div', { className: 'about-page' },
@@ -20,22 +34,27 @@ export default function Page() {
         )
       )
     ),
-    React.createElement('h2', null, '🗑️ ประเภทถังขยะ'),
-    React.createElement('div', { className: 'bins' },
-      React.createElement('div', { className: 'bin-card blue' },
-        React.createElement(Image, { src: '/Blue_Bin.png', alt: 'ขยะทั่วไป', width: 84, height: 84 }),
-        React.createElement('h3', null, 'ขยะทั่วไป'),
-        React.createElement('p', null, 'ขยะทั่วไปย่อยสลายได้ยาก')
-      ),
-      React.createElement('div', { className: 'bin-card yellow' },
-        React.createElement(Image, { src: '/Yellow_Bin.png', alt: 'ขยะรีไซเคิล', width: 84, height: 84 }),
-        React.createElement('h3', null, 'ขยะรีไซเคิล'),
-        React.createElement('p', null, 'ขยะที่นำกลับมาใช้ผลิตใหม่ได้')
-      ),
-      React.createElement('div', { className: 'bin-card green' },
-        React.createElement(Image, { src: '/Green_Bin.png', alt: 'ขยะเปียก', width: 84, height: 84 }),
-        React.createElement('h3', null, 'ขยะเปียก'),
-        React.createElement('p', null, 'ขยะที่ย่อยสลายได้ตามธรรมชาติ')
+    React.createElement('h2', null, '🗺️ ตารางประเภทขยะและถังที่แนะนำ'),
+    React.createElement('p', { className: 'mapping-note' }, 'รายการอ้างอิงสำหรับจุด ICT-001 หากผลสแกนแนะนำถัง ให้ยึดเลขและชื่อถังจากหน้าผลลัพธ์'),
+    React.createElement('div', { className: 'mapping-table-wrap' },
+      React.createElement('table', { className: 'mapping-table' },
+        React.createElement('thead', null,
+          React.createElement('tr', null,
+            React.createElement('th', { scope: 'col' }, 'ประเภทขยะ'),
+            React.createElement('th', { scope: 'col' }, 'ทิ้งลงถัง')
+          )
+        ),
+        React.createElement('tbody', null,
+          binMappings.map(({ waste, binNumber, binName }) =>
+            React.createElement('tr', { key: `${waste}-${binNumber}` },
+              React.createElement('td', null, waste),
+              React.createElement('td', null,
+                React.createElement('span', { className: 'mapping-bin-number' }, `ถัง ${binNumber}`),
+                React.createElement('span', null, binName)
+              )
+            )
+          )
+        )
       )
     ),
     React.createElement('h2', null, '🌱 ประโยชน์ของการแยกขยะ'),
@@ -70,7 +89,9 @@ export default function Page() {
       .about-page {
         width: 100%;
         height: 100dvh;
-        overflow: hidden;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
         margin: 0 auto;
         padding: clamp(14px, 3vh, 32px) clamp(16px, 3vw, 32px) clamp(20px, 4vh, 56px);
         color: #172859;
@@ -120,33 +141,43 @@ export default function Page() {
         font-size: clamp(13px, 2.2vh, var(--text-base));
         line-height: 1.3;
       }
-      .about-page .bins {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: clamp(8px, 1.5vw, 16px);
-        width: 100%;
-        margin-top: clamp(4px, 1vh, 8px);
+      .about-page .mapping-note {
+        margin: -4px 0 10px;
+        color: #506080;
+        font-size: clamp(12px, 1.9vh, var(--text-sm));
       }
-      .about-page .bin-card {
+      .about-page .mapping-table-wrap {
         width: 100%;
-        border: 1px solid #e5e7eb;
+        overflow-x: auto;
+        border: 1px solid #dfe5f0;
         border-radius: 12px;
-        padding: clamp(8px, 1.5vh, 16px);
         background: #fff;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-        text-align: center;
       }
-      .about-page .bin-card h3 {
-        margin: 4px 0 2px;
-        font-size: clamp(15px, 2.5vh, 23px);
+      .about-page .mapping-table {
+        width: 100%;
+        border-collapse: collapse;
+        color: #172859;
+        font-size: clamp(13px, 2vh, var(--text-base));
+        line-height: 1.35;
+      }
+      .about-page .mapping-table th,
+      .about-page .mapping-table td {
+        padding: clamp(8px, 1.2vh, 14px) clamp(10px, 1.5vw, 18px);
+        border-bottom: 1px solid #e8ecf4;
+        text-align: left;
+      }
+      .about-page .mapping-table th {
+        background: #eef3ff;
         font-weight: 700;
       }
-      .about-page .bin-card img {
-        width: clamp(44px, 7vh, 84px);
-        height: clamp(44px, 7vh, 84px);
-        object-fit: contain;
+      .about-page .mapping-table tbody tr:last-child td { border-bottom: 0; }
+      .about-page .mapping-bin-number {
+        display: inline-block;
+        min-width: 74px;
+        margin-right: 8px;
+        color: #2756d4;
+        font-weight: 700;
       }
-      .about-page .bin-card p { color: #555; font-size: clamp(12px, 1.8vh, 18px); line-height: 1.3; }
       .about-page .aboutFooter{
         background:#fff;
         border-radius:12px;
@@ -190,7 +221,6 @@ export default function Page() {
       .about-page .emoji{ font-size:15px; }
       @media (max-width:640px){
         .about-page .steps,
-        .about-page .bins { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .about-page .benefits { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .about-page > h1 { font-size: clamp(25px, 5vh, 38px); }
         .about-page > h2,

@@ -22,7 +22,6 @@ const FRAME_CHECK_INTERVAL_MS = 200;
 const MAX_STABLE_FRAME_DELTA = 7;
 const PRESENCE_PIXEL_DELTA = 16;
 const MIN_PRESENCE_CHANGED_RATIO = 0.005;
-const MAX_PRESENCE_CHANGED_RATIO = 0.9;
 
 function sampleVideoFrame(video) {
   const canvas = document.createElement('canvas');
@@ -80,10 +79,12 @@ export async function waitForStableCameraFrame({
   shouldCancel = () => false,
   onProgress = () => {},
 }) {
+  const waitStartedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
   let previousFrame = null;
   let stableSince = null;
   let lastVideoTime = -1;
   let lastReportedState = '';
+  let presenceActive = false;
 
   while (!shouldCancel()) {
     if (video?.readyState >= 2 && video.videoWidth > 0 && video.currentTime !== lastVideoTime) {
@@ -98,8 +99,16 @@ export async function waitForStableCameraFrame({
       const delta = frameDelta(previousFrame, frame.gray);
       const changedPixelRatio = sceneChangedPixelRatio(frame.gray, referenceFrame);
       const hasPresence = changedPixelRatio !== null &&
-        changedPixelRatio >= MIN_PRESENCE_CHANGED_RATIO &&
-        changedPixelRatio <= MAX_PRESENCE_CHANGED_RATIO;
+        changedPixelRatio >= MIN_PRESENCE_CHANGED_RATIO;
+      if (hasPresence && !presenceActive) {
+        onProgress({
+          event: 'object_present',
+          state: 'detected',
+          changedPixelRatio,
+          elapsedMs: Math.round(timestamp - waitStartedAt),
+        });
+      }
+      presenceActive = hasPresence;
       const state = !hasPresence
         ? 'no_object'
         : frame.brightness < 25 || frame.brightness > 238
@@ -111,22 +120,55 @@ export async function waitForStableCameraFrame({
             : 'moving';
 
       if (state === 'stable') {
-        if (stableSince === null) stableSince = timestamp;
+        const stabilityTimerStarted = stableSince === null;
+        if (stabilityTimerStarted) stableSince = timestamp;
+        const stabilityElapsedMs = Math.round(timestamp - stableSince);
+        onProgress({
+          event: 'presence_check',
+          state,
+          changedPixelRatio,
+          presenceThreshold: { min: MIN_PRESENCE_CHANGED_RATIO, max: 1 },
+          presencePassed: hasPresence,
+          stabilityElapsedMs,
+          waitElapsedMs: Math.round(timestamp - waitStartedAt),
+        });
         if (timestamp - stableSince >= stableMs) {
           return {
             ready: true,
-            stableForMs: Math.round(timestamp - stableSince),
+            stableForMs: stabilityElapsedMs,
             changedPixelRatio,
+            waitDurationMs: Math.round(timestamp - waitStartedAt),
           };
         }
         if (lastReportedState !== 'stable') {
-          onProgress({ state: 'stable', changedPixelRatio });
+          onProgress({
+            state: 'stable',
+            changedPixelRatio,
+            stabilityTimerStarted,
+            stabilityElapsedMs: Math.round(timestamp - stableSince),
+            waitElapsedMs: Math.round(timestamp - waitStartedAt),
+          });
           lastReportedState = 'stable';
         }
       } else {
+        const stabilityTimerReset = stableSince !== null;
         stableSince = null;
+        onProgress({
+          event: 'presence_check',
+          state,
+          changedPixelRatio,
+          presenceThreshold: { min: MIN_PRESENCE_CHANGED_RATIO, max: 1 },
+          presencePassed: hasPresence,
+          stabilityElapsedMs: 0,
+          waitElapsedMs: Math.round(timestamp - waitStartedAt),
+        });
         if (lastReportedState !== state) {
-          onProgress({ state, changedPixelRatio });
+          onProgress({
+            state,
+            changedPixelRatio,
+            stabilityTimerReset,
+            waitElapsedMs: Math.round(timestamp - waitStartedAt),
+          });
           lastReportedState = state;
         }
       }
