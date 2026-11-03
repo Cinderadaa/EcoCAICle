@@ -1,0 +1,65 @@
+import React from 'react';
+import BinSticker from '@/components/BinSticker';
+import { getPreparationStepText } from '@/lib/preparationGuidance';
+
+/**
+ * Render the dedicated two-step food preparation screen.
+ * The destination values are still validated from the backend response, but
+ * this presentation intentionally does not render the standard result card.
+ */
+export default function PreparationFlow({
+  preparation = null,
+}) {
+  if (!preparation?.required || !Array.isArray(preparation.steps) || preparation.steps.length !== 2) {
+    return null;
+  }
+
+  const firstStep = preparation.steps[0];
+  const sharedDestination = preparation.shared_disposal_destination;
+  const containerDestination = preparation.container_disposal;
+
+  if (
+    !sharedDestination ||
+    sharedDestination.type !== 'designated_disposal_point' ||
+    sharedDestination.bin_id !== null ||
+    sharedDestination.bin_number !== null ||
+    !containerDestination ||
+    containerDestination.type !== 'mapped_bin' ||
+    !Number.isInteger(containerDestination.bin_number) ||
+    containerDestination.bin_number <= 0 ||
+    typeof containerDestination.bin_name !== 'string' ||
+    !containerDestination.bin_name.trim()
+  ) {
+    return null;
+  }
+
+  const firstStepText = getPreparationStepText(firstStep, 'เทเศษอาหาร');
+  const secondStepText = getPreparationStepText(
+    preparation.steps[1],
+    'นำภาชนะไปทิ้งที่ถังนี้',
+  );
+
+  return (
+    <section className="tt-food-flow__card" aria-label="ขั้นตอนการแยกก่อนทิ้ง">
+      <div className="tt-food-flow__step">
+        <span className="tt-food-flow__number" aria-hidden="true">1</span>
+        <strong>{firstStepText}</strong>
+        <img className="tt-food-flow__food-icon" src={firstStep?.icon || "/เทไอคอน.png"} alt={firstStepText} />
+      </div>
+
+      <img className="tt-food-flow__arrow" src="/ลูกศร.png" alt="แล้วจึง" />
+
+      <div className="tt-food-flow__step tt-food-flow__step--bin">
+        <span className="tt-food-flow__number" aria-hidden="true">2</span>
+        <BinSticker
+          binNumber={containerDestination.bin_number}
+          binName={containerDestination.bin_name}
+        />
+        <div className="tt-food-flow__bin-copy">
+          <span className="tt-food-flow__bin-instruction">{secondStepText}</span>
+          <p className="tt-food-flow__bin-name">{containerDestination.bin_name}</p>
+        </div>
+      </div>
+    </section>
+  );
+}

@@ -1,0 +1,275 @@
+{
+  "schema_version": "1.0",
+  "location_id": "ICT-001",
+  "location_name": "ICT Kiosk",
+  "mapping_version": "ICT-10-bin-v3",
+  "enabled": true,
+  "classification_policy": {
+    "confidence_threshold": 0.7,
+    "infectious_low_confidence_override": {
+      "enabled": true,
+      "waste_category": "infectious",
+      "confidence_threshold": 0.5,
+      "object_name_th_allowlist": [
+        "หน้ากากอนามัยใช้แล้ว",
+        "หน้ากากทางการแพทย์ใช้แล้ว",
+        "หน้ากากใช้แล้ว",
+        "ถุงมือยางใช้แล้ว",
+        "ชุดตรวจวินิจฉัย",
+        "ชุดตรวจ ATK",
+        "ชุดตรวจโควิด",
+        "ชุดตรวจโควิด-19",
+        "ชุดตรวจ ATK โควิด",
+        "ชุดตรวจแอนติเจน",
+        "ชุดตรวจเร็ว ATK",
+        "เข็มฉีดยา",
+        "เข็มฉีดยาใช้แล้ว",
+        "เข็ม",
+        "เข็มปนเปื้อน",
+        "วัสดุการแพทย์ปนเปื้อน",
+        "วัสดุทางการแพทย์ปนเปื้อน"
+      ],
+      "mapping_reason": "local_infectious_alias_override"
+    },
+    "unknown_fallback": {
+      "enabled": true,
+      "applies_to": [
+        "unknown",
+        "low_confidence"
+      ],
+      "bin_id": "ICT-001-B01",
+      "reason": "unknown-classification"
+    }
+  },
+  "bins": [
+    {
+      "bin_id": "ICT-001-B01",
+      "bin_number": 1,
+      "bin_name": "ขยะทั่วไป (ขยะฝังกลบ)",
+      "icon": "/general_waste.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B02",
+      "bin_number": 2,
+      "bin_name": "ขวดพลาสติก PET",
+      "icon": "/pet_bottle.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B03",
+      "bin_number": 3,
+      "bin_name": "พลาสติกยืด",
+      "icon": "/plastic.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B04",
+      "bin_number": 4,
+      "bin_name": "กระดาษ",
+      "icon": "/paper.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B05",
+      "bin_number": 5,
+      "bin_name": "ขวดแก้ว",
+      "icon": "/glass.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B06",
+      "bin_number": 6,
+      "bin_name": "กระป๋องอะลูมิเนียมและโลหะอื่น ๆ",
+      "icon": "/metal.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B07",
+      "bin_number": 7,
+      "bin_name": "ขยะอิเล็กทรอนิกส์",
+      "icon": "/electronic.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B08",
+      "bin_number": 8,
+      "bin_name": "ขยะเชื้อเพลิง",
+      "icon": "/fuel.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B09",
+      "bin_number": 9,
+      "bin_name": "ขยะอันตราย",
+      "icon": "/hazardous_waste.png",
+      "enabled": true
+    },
+    {
+      "bin_id": "ICT-001-B10",
+      "bin_number": 10,
+      "bin_name": "ขยะติดเชื้อ",
+      "icon": "/infectious.png",
+      "enabled": true
+    }
+  ],
+  "category_mapping": {
+    "general": "ICT-001-B01",
+    "pet_bottle": "ICT-001-B02",
+    "plastic": "ICT-001-B03",
+    "paper": "ICT-001-B04",
+    "glass": "ICT-001-B05",
+    "metal": "ICT-001-B06",
+    "ewaste": "ICT-001-B07",
+    "fuel": "ICT-001-B08",
+    "hazardous": "ICT-001-B09",
+    "infectious": "ICT-001-B10"
+  },
+  "mapping_rulebook": {
+    "version": "ICT-physical-bin-rules-v1",
+    "ordered_rules": [
+      {
+        "id": "infectious",
+        "waste_categories": ["infectious"],
+        "bin_id": "ICT-001-B10",
+        "mapping_reason": "infectious_waste"
+      },
+      {
+        "id": "hazardous",
+        "waste_categories": ["hazardous"],
+        "bin_id": "ICT-001-B09",
+        "mapping_reason": "hazardous_waste"
+      },
+      {
+        "id": "e_waste",
+        "waste_categories": ["ewaste"],
+        "bin_id": "ICT-001-B07",
+        "mapping_reason": "electronic_waste"
+      },
+      {
+        "id": "clean_recyclable_material",
+        "waste_categories": ["pet_bottle", "plastic", "paper", "glass", "metal"],
+        "visible_conditions": ["clean_dry", "food_or_liquid_contaminated"],
+        "material_subtype_bins": {
+          "pet_bottle": "ICT-001-B02",
+          "stretch_plastic": "ICT-001-B03",
+          "paper": "ICT-001-B04",
+          "cardboard": "ICT-001-B04",
+          "glass": "ICT-001-B05",
+          "metal": "ICT-001-B06"
+        },
+        "material_subtype_categories": {
+          "pet_bottle": ["pet_bottle"],
+          "stretch_plastic": ["plastic"],
+          "paper": ["paper"],
+          "cardboard": ["paper"],
+          "glass": ["glass"],
+          "metal": ["metal"]
+        },
+        "requires_preparation_path_when_contaminated": true,
+        "preparation_mapping_reason": "recyclable_after_preparation",
+        "mapping_reason": "clean_dry_recyclable_material"
+      },
+      {
+        "id": "rdf_fuel",
+        "waste_categories": ["plastic", "fuel"],
+        "visible_conditions": ["clean_dry"],
+        "eligible_material_subtypes": [
+          "multilayer_packaging",
+          "snack_sachet",
+          "coffee_sachet",
+          "refill_pouch",
+          "non_recyclable_foam",
+          "plastic_coated_paper",
+          "non_recyclable_dry_plastic",
+          "plastic_straw",
+          "plastic_spoon"
+        ],
+        "mapping_reason_by_material_subtype": {
+          "plastic_straw": "clean_dry_plastic_straw_rdf",
+          "plastic_spoon": "clean_dry_plastic_spoon_rdf"
+        },
+        "eligible_object_names_th": [],
+        "bin_id": "ICT-001-B08",
+        "mapping_reason": "rdf_allowlist_match"
+      },
+      {
+        "id": "fallback",
+        "bin_id": "ICT-001-B01",
+        "mapping_reason": "default_general_fallback",
+        "mapping_reasons": {
+          "unknown": "unknown_category_fallback",
+          "low_confidence": "low_confidence_fallback",
+          "contaminated": "contaminated_without_preparation_fallback",
+          "unknown_condition": "unknown_cleanliness_fallback",
+          "default": "unsupported_material_fallback"
+        }
+      }
+    ]
+  },
+  "food_contamination_flow": {
+    "enabled": false,
+    "status": "unresolved",
+    "trigger": {
+      "waste_category": "plastic",
+      "has_food_scraps": true
+    },
+    "container_bin_id": "ICT-001-B03",
+    "food_scrap_destination": {
+      "bin_id": null,
+      "label_th": "ลงถังเศษอาหาร"
+    },
+    "steps": [
+      {
+        "step": 1,
+        "action_th": "เทเศษอาหาร",
+        "icon": "/เทไอคอน.png",
+        "destination": "ลงถังเศษอาหาร"
+      },
+      {
+        "step": 2,
+        "action_th": "ทิ้งภาชนะ",
+        "destination_prefix": "ลงถัง",
+        "destination_bin_id": "ICT-001-B03"
+      }
+    ]
+  },
+  "preparation": {
+    "enabled": true,
+    "version": "ICT-preparation-v1",
+    "signal": "has_food_scraps",
+    "signal_semantics": "combined_food_liquid_contamination",
+    "trigger": {
+      "has_food_scraps": true,
+      "requires_confirmed_mapping": true,
+      "waste_categories": [
+        "pet_bottle",
+        "plastic",
+        "paper",
+        "glass",
+        "metal"
+      ]
+    },
+    "shared_disposal_destination": {
+      "destination_id": "ICT-001-FOOD-LIQUID-SEPARATION",
+      "type": "designated_disposal_point",
+      "label_th": "จุดแยกเศษอาหาร/ของเหลว"
+    },
+    "steps": [
+      {
+        "step": 1,
+        "action_th": "แยกเศษอาหารหรือเทของเหลวที่เหลือ",
+        "instruction_th": "แยกเศษอาหารหรือเทของเหลวที่เหลือที่จุดแยกที่กำหนด",
+        "icon": "/เทไอคอน.png",
+        "destination_ref": "shared_disposal_destination"
+      },
+      {
+        "step": 2,
+        "action_th": "ทิ้งภาชนะ",
+        "instruction_th": "ทิ้งภาชนะลงถังที่ระบบแนะนำด้านบน",
+        "icon": "/Tang.png",
+        "destination_ref": "mapped_container_bin"
+      }
+    ]
+  }
+}
