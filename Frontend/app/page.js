@@ -880,6 +880,13 @@ export default function Page() {
         return;
       }
       const normalizedResult = normalizeClassificationResponse(detectionResult);
+      if (normalizedResult?.status === 'no_waste_detected' || normalizedResult?.no_waste_detected) {
+        showScanError(
+          normalizedResult.retry_message || 'ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่',
+          activeScan,
+        );
+        return;
+      }
       if (normalizedResult?.status === 'api_error' || normalizedResult?.valid_prediction === false) {
         const apiError = new Error('Prediction failed');
         apiError.responseStatus = 'api_error';

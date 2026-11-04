@@ -87,7 +87,7 @@ API_URL = os.environ.get("QWEN_API_URL", "https://genai-local.boonrawd.co.th/lit
 MODEL = os.environ.get("QWEN_MODEL", "qwen3-vl:4b")
 QWEN_REQUEST_TIMEOUT_SECONDS = 40
 GLASS_PET_REVIEW_CONFIDENCE_GAP = 0.15
-PROMPT_VERSION = os.environ.get("ECOCAICLE_PROMPT_VERSION") or "qwen-waste-classification-v5"
+PROMPT_VERSION = os.environ.get("ECOCAICLE_PROMPT_VERSION") or "qwen-waste-classification-v7"
 REVIEWER_TOKEN = os.environ.get("ECOCAICLE_REVIEWER_TOKEN")
 API_KEY = os.environ.get("QWEN_API_KEY")
 CA_BUNDLE = os.environ.get("QWEN_CA_BUNDLE")
@@ -137,7 +137,11 @@ DEFAULT_ITEM_NAMES = {
     "infectious": "ขยะติดเชื้อ",
     "unknown": "ไม่สามารถระบุได้",
 }
-PROMPT = """Identify and classify only the primary waste item visible in the image. Return classification data only. Never return a bin number, bin name, bin ID, destination, disposal instruction, or mapping decision; the backend handles mapping and any preparation guidance.
+PROMPT = """Identify and classify a waste item only when a clearly visible physical waste object is present in the image. Return classification data only. Never return a bin number, bin name, bin ID, destination, disposal instruction, or mapping decision; the backend handles mapping and any preparation guidance.
+
+First decide whether an identifiable physical waste object is actually visible. Do not infer or invent a waste item from a person, face, hand, clothing, desk, keyboard, background, shadows, reflections, or motion. If no identifiable waste object is visible, return exactly the no-waste classification: object_name_th "ไม่พบขยะในภาพ", waste_category "unknown", material_subtype "unknown", low confidence (0.0–0.2), and exactly three top_candidates whose names/categories/subtypes are consistent with no waste and unknown. Candidate 1 must match the primary fields. Set resin_identification_code and visible_condition to "unknown", and has_food_scraps and has_liquid to false.
+
+For any waste classification, require visible material and shape evidence before returning PET, glass, metal, paper, or plastic. Object shape alone, a person's belongings, or contextual assumptions are not evidence of waste material.
 
 Identify the main item itself. Ignore hands, people, background, caps, labels, and minor accessories when identifying its primary material. A cap or label may be read only as evidence about the body when it visibly carries a resin/material mark; it does not define the body's material. Describe the item briefly in Thai, using only visible evidence; do not invent a brand, contents, or material.
 
@@ -145,10 +149,13 @@ Choose waste_category from: general, pet_bottle, plastic, paper, glass, metal, e
 Choose material_subtype from: pet_bottle, stretch_plastic, rigid_plastic, plastic_straw, plastic_spoon, multilayer_packaging, snack_sachet, coffee_sachet, refill_pouch, non_recyclable_foam, plastic_coated_paper, non_recyclable_dry_plastic, paper, cardboard, glass, metal, e_waste, hazardous, infectious, general, unknown.
 
 Visual decision rules:
-- A beverage bottle with a clearly visible resin code 1, PET, or PETE on the bottle body is waste_category pet_bottle and material_subtype pet_bottle. Return resin_identification_code "1" for this evidence.
-- Do not infer PET solely from bottle shape. A beverage bottle may be classified pet_bottle when its transparent plastic body is visibly supported as plastic even without a legible resin mark; when neither resin/PET marking nor transparent plastic evidence is visible, use unknown if material evidence is insufficient. Transparency alone does not prove that a non-bottle item is PET.
-- Use resin_identification_code "1" through "7" only when that code is legible; otherwise use the string "unknown". PET/PETE text indicates code "1".
+- For Bin 2 eligibility, identify a beverage bottle and visibly supported PET body material. A legible resin code 1 or PET/PETE mark on the bottle body is strong evidence; visible bottle/body evidence may support PET only when the material is visibly plastic. Bottle shape or transparency alone is not enough. Do not return a PET classification when the bottle material is uncertain.
+- Never infer resin_identification_code from bottle shape, color, transparency, or other appearance. Return code "1" through "7" only when that exact code is legible; otherwise return the string "unknown". PET/PETE text indicates code "1" only when it is visibly present.
 - Never emit material_subtype rigid_plastic for an item classified as pet_bottle. Use rigid_plastic only for supported non-PET rigid plastic items.
+- For ICT-001, category and subtype are separate fields: use waste_category "plastic" for plastic items and identify the specific material in material_subtype. The PET beverage-bottle label remains waste_category/material_subtype "pet_bottle" under its dedicated Bin 2 route.
+- Set material_subtype "stretch_plastic" only for visibly flexible plastic film or bags: carrier bags, soup/ice bags, produce bags, cling film, shrink/stretch film around packs, bubble wrap, or zip-lock bags. The item must visibly flex or have film/bag structure; do not infer flexibility from packaging context. Never use stretch_plastic for rigid containers, bottles, cups, spoons, straws, jars, or hard packaging.
+- ICT-001 local routing: clean, dry PET beverage bottles use subtype pet_bottle for Bin 2; clean, dry stretch_plastic bags/film use subtype stretch_plastic for Bin 3; clean, dry plastic/packaging not accepted by either uses its supported subtype for RDF Bin 8. Clean, dry non-PET rigid plastic uses waste_category plastic and subtype rigid_plastic for Bin 8. Keep pet_bottle and stretch_plastic out of RDF. Clean, dry disposable plastic straws and disposable plastic cutlery/spoons remain approved RDF subtypes. Do not infer bin names or numbers in the JSON.
+- Food/liquid-contaminated plastic, plastic that cannot be cleaned, and plastic with unknown cleanliness do not qualify for Bin 2, Bin 3, or RDF; use visible_condition accordingly so ICT-001 routes it to general/landfill Bin 1.
 - A glass classification requires visible evidence of glass in the primary item's body, such as characteristic refraction, thick rigid glass walls or lip, or a substantial glass base. Do not classify an opaque plastic bottle as glass without such evidence. Bottle shape, reflections, contents, and a cap alone do not prove glass.
 - Distinguish paper from cardboard by form: flat sheets or thin paper are paper; formed boxes and corrugated board are waste_category paper with material_subtype cardboard. Do not call cardboard a different waste_category.
 - A clearly identifiable thin, hollow disposable drinking straw with visibly plastic material is waste_category plastic and material_subtype plastic_straw. A straw may be white or colored; use the visible hollow drinking-straw form and plastic evidence, not color alone.
@@ -568,6 +575,75 @@ def _parse_model_response(
         raw_category,
         top_candidates,
     )
+
+
+NO_WASTE_RETRY_MESSAGE_TH = "ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่"
+NO_WASTE_OBJECT_NAME_TH = "ไม่พบขยะในภาพ"
+
+
+def _is_no_waste_prediction(raw: object) -> bool:
+    """Recognize explicit no-waste model output before any bin mapping occurs."""
+    text = str(raw).strip()
+    if text.startswith("```") and text.endswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        response = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(response, dict):
+        return False
+    category = str(response.get("waste_category", response.get("wasteType", ""))).strip().lower()
+    object_name = normalize_object_name_th(
+        response.get("object_name_th") or response.get("objectNameTh") or
+        response.get("item_name_th") or response.get("itemNameTh") or ""
+    )
+    explicit = response.get("no_waste_detected") is True or response.get("valid_capture") is False
+    return explicit or (category == "unknown" and object_name == normalize_object_name_th(NO_WASTE_OBJECT_NAME_TH))
+
+
+def _no_waste_response(*, request_id: str, stored_image: Optional[StoredImage],
+                       timestamp: str, request_started_at: float,
+                       inference_started_at: float, image_save_status: str,
+                       storage_error_type: Optional[str]) -> dict[str, object]:
+    """Build an invalid-capture result that cannot carry or imply a bin."""
+    top_candidates = [
+        {"object_name_th": NO_WASTE_OBJECT_NAME_TH, "waste_category": "unknown",
+         "material_subtype": "unknown", "confidence": score}
+        for score in (0.1, 0.05, 0.0)
+    ]
+    _safe_inference_record(
+        request_id=request_id, timestamp=timestamp, request_started_at=request_started_at,
+        inference_started_at=inference_started_at, stored_image=stored_image,
+        image_save_status=image_save_status, storage_error_type=storage_error_type,
+        object_name_th=NO_WASTE_OBJECT_NAME_TH, waste_category="unknown",
+        material_subtype="unknown", resin_identification_code="unknown",
+        visible_condition="unknown", confidence=0.1, has_food_scraps=False,
+        has_liquid=False, bin_id=None, bin_number=None, bin_name=None,
+        mapping_version=MAPPING_CONFIG.mapping_version if MAPPING_CONFIG else None,
+        classification_status="invalid_capture", mapping_fallback=False,
+        status="no_waste_detected", error_type=None, top_candidates=top_candidates,
+        mapping_reason="no_waste_detected",
+    )
+    return {
+        "request_id": request_id, "prompt_version": PROMPT_VERSION,
+        "location_id": MAPPING_LOCATION_ID,
+        "prediction": {"object_name_th": NO_WASTE_OBJECT_NAME_TH,
+            "waste_category": "unknown", "material_subtype": "unknown",
+            "resin_identification_code": "unknown", "visible_condition": "unknown",
+            "confidence": 0.1, "top_candidates": top_candidates,
+            "has_food_scraps": False, "has_liquid": False,
+            "wasteType": "unknown", "itemNameTh": NO_WASTE_OBJECT_NAME_TH,
+            "prompt_version": PROMPT_VERSION},
+        "object_name_th": NO_WASTE_OBJECT_NAME_TH, "waste_category": "unknown",
+        "material_subtype": "unknown", "confidence": 0.1,
+        "top_candidates": top_candidates, "bin_id": None, "bin_number": None,
+        "bin_name": None, "mappedBin": None, "mapping_fallback": False,
+        "mapping_reason": "no_waste_detected", "mapping_version": MAPPING_CONFIG.mapping_version if MAPPING_CONFIG else None,
+        "classification_status": "invalid_capture", "status": "no_waste_detected",
+        "no_waste_detected": True, "valid_prediction": False,
+        "retry_message": NO_WASTE_RETRY_MESSAGE_TH,
+        "preparation": _no_preparation("no_waste_detected"),
+    }
 
 
 def _post_json(payload: dict) -> dict:
@@ -1242,6 +1318,14 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         request_id,
         _elapsed_ms(inference_started_at),
     )
+
+    if _is_no_waste_prediction(raw_prediction):
+        LOGGER.info("No waste object detected request_id=%s", request_id)
+        return _no_waste_response(
+            request_id=request_id, stored_image=stored_image, timestamp=timestamp,
+            request_started_at=request_started_at, inference_started_at=inference_started_at,
+            image_save_status=image_save_status, storage_error_type=storage_error_type,
+        )
 
     (
         waste_type,

@@ -173,10 +173,26 @@ class MappingService:
             )
             return self._bin_one_fallback(classification_status, mapping_reason=reason)
 
+        # ICT-001 accepts plastic-family material routes only when the item is
+        # visibly clean and dry. Contaminated or unknown-condition plastic must
+        # never reach the recyclable or RDF rules, even when a prep flow exists.
+        if (
+            self.config.location_id == "ICT-001"
+            and normalized_category in {"plastic", "pet_bottle"}
+            and normalized_condition != "clean_dry"
+        ):
+            fallback_rule = rulebook_rules[-1] if rulebook_rules else {}
+            reason = self._fallback_reason(
+                fallback_rule,
+                classification_status=classification_status,
+                visible_condition=normalized_condition,
+            )
+            return self._bin_one_fallback(classification_status, mapping_reason=reason)
+
         if not rulebook_rules:
             # The legacy plastic category mapping is retained in configuration
-            # for compatibility, but category alone cannot identify stretch
-            # plastic and must never route generic plastic to Bin 3.
+            # for compatibility, but category alone cannot identify a plastic
+            # subtype and must never route generic plastic to a physical bin.
             if normalized_category == "plastic":
                 return self._bin_one_fallback(
                     classification_status,

@@ -76,6 +76,28 @@ test('valid Thai title and confirmed canonical mappedBin are preserved', () => {
   assert.deepEqual(getAuthoritativeBin(normalized), { number: 4, category: 'กระดาษ', fallback: false });
 });
 
+test('face-only no-waste capture is an invalid retry with no bin fallback', () => {
+  const normalized = normalizeClassificationResponse({
+    request_id: 'd1e35391-399f-4edc-9130-bbe3c3108938',
+    location_id: 'ICT-001', mapping_version: 'ICT-10-bin-v3',
+    status: 'no_waste_detected', classification_status: 'invalid_capture',
+    no_waste_detected: true, valid_prediction: false,
+    retry_message: 'ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่',
+    prediction: { waste_category: 'unknown', object_name_th: 'ไม่พบขยะในภาพ', confidence: 0.1 },
+    bin_id: null, bin_number: null, bin_name: null, mappedBin: null,
+    mapping_fallback: false,
+  });
+
+  assert.equal(normalized.status, 'no_waste_detected');
+  assert.equal(normalized.classification_status, 'invalid_capture');
+  assert.equal(normalized.valid_prediction, false);
+  assert.equal(normalized.no_waste_detected, true);
+  assert.equal(normalized.retry_message, 'ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่');
+  assert.equal(normalized.bin_number, null);
+  assert.equal(normalized.mappedBin, null);
+  assert.equal(getAuthoritativeBin(normalized), null);
+});
+
 test('consecutive current API mappings survive clearing result display state at Welcome', () => {
   const scans = [
     {

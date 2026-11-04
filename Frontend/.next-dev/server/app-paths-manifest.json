@@ -1,6 +1,5 @@
 {
-  "/scan-history/page": "app/scan-history/page.js",
   "/page": "app/page.js",
-  "/review/page": "app/review/page.js",
-  "/api/review/[...path]/route": "app/api/review/[...path]/route.js"
+  "/scan-history/page": "app/scan-history/page.js",
+  "/api/scan-history/[requestId]/image/route": "app/api/scan-history/[requestId]/image/route.js"
 }

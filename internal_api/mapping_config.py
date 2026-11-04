@@ -212,6 +212,7 @@ def _validate_mapping_rulebook(
     raw_rulebook: object,
     *,
     bins: Mapping[str, BinDefinition],
+    location_id: str,
 ) -> Mapping[str, Any]:
     if raw_rulebook is None:
         # Compatibility for older non-ICT test/deployment configurations.
@@ -351,7 +352,9 @@ def _validate_mapping_rulebook(
     if len(rules) != len(expected_ids) or rules[-1].get("id") != "fallback":
         raise MappingConfigError("mapping_rulebook must define all required priority rules and a final fallback")
     rdf_rule = rules[4]
-    forbidden_rdf_subtypes = {"pet_bottle", "stretch_plastic", "rigid_plastic", "paper", "cardboard", "glass", "metal", "e_waste", "hazardous", "infectious"}
+    forbidden_rdf_subtypes = {"pet_bottle", "stretch_plastic", "paper", "cardboard", "glass", "metal", "e_waste", "hazardous", "infectious"}
+    if location_id != "ICT-001":
+        forbidden_rdf_subtypes.add("rigid_plastic")
     if forbidden_rdf_subtypes.intersection(rdf_rule.get("eligible_material_subtypes", ())):
         raise MappingConfigError("mapping_rulebook RDF rule includes a subtype reserved for another bin or excluded material")
     rdf_categories = set(rdf_rule.get("waste_categories", ()))
@@ -737,6 +740,7 @@ def validate_location_config(
     mapping_rulebook = _validate_mapping_rulebook(
         raw_config.get("mapping_rulebook"),
         bins=bins,
+        location_id=location_id,
     )
 
     food_contamination_flow = _validate_food_contamination_flow(

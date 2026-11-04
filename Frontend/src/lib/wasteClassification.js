@@ -212,6 +212,7 @@ const AUTHORITATIVE_STATUSES = Object.freeze([
   'unknown',
   'missing_mapping',
   'api_error',
+  'no_waste_detected',
 ]);
 
 function hasOwn(source, key) {
@@ -487,6 +488,8 @@ function buildNormalizedResult({
       confidence,
     },
     valid_prediction: validPrediction,
+    retry_message: typeof source?.retry_message === 'string' ? source.retry_message : null,
+    no_waste_detected: source?.no_waste_detected === true || status === 'no_waste_detected',
     topK: Array.isArray(source?.topK) ? source.topK : [],
     model,
     classification: getClassificationPresentation(wasteType),
@@ -636,6 +639,23 @@ function normalizeAuthoritativeBackendResponse(source) {
     ? source.status
     : 'api_error';
   const backendMapping = readBackendMapping(source);
+  if (backendStatus === 'no_waste_detected') {
+    return buildNormalizedResult({
+      source,
+      wasteType: WASTE_TYPE.UNKNOWN,
+      objectNameTh: '',
+      confidence,
+      hasFoodScraps: false,
+      hasLiquid: false,
+      classificationStatus: 'invalid_capture',
+      status: 'no_waste_detected',
+      mapping: null,
+      mappingVersion: typeof source.mapping_version === 'string' ? source.mapping_version : null,
+      requestId: typeof source.request_id === 'string' ? source.request_id : null,
+      locationId: typeof source.location_id === 'string' ? source.location_id : null,
+      validPrediction: false,
+    });
+  }
   const mappingCanRender = backendMapping.available && (
     backendStatus === 'success' || backendStatus === 'unknown' ||
     (backendStatus === 'missing_mapping' && backendMapping.isFallback)

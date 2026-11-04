@@ -1,6 +1,6 @@
 # Qwen prompt-first regression experiment
 
-Current prompt version: `qwen-waste-classification-v5` (override with
+Current prompt version: `qwen-waste-classification-v7` (override with
 `ECOCAICLE_PROMPT_VERSION` when deliberately deploying a distinct prompt).
 The version is returned by `/predict`, stored in each inference record, and
 included in Scan History metadata.
@@ -42,11 +42,20 @@ included in Scan History metadata.
   confidence-ranked. The parser safely normalizes candidate 1 to the primary
   prediction, preserves a usable primary result if fewer than three candidates
   arrive, and logs `top_candidates_incomplete` without retrying the request.
+- Face-only or otherwise empty captures use the explicit
+  `no_waste_detected`/`invalid_capture` result, have no bin destination, and
+  return `ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่`. This bypasses unknown
+  classification fallback mapping, including Bin 1.
+- ICT-001 plastic routing follows the local subtype policy: PET beverage bottles
+  use `pet_bottle`; flexible film/bags use `stretch_plastic`; clean rigid plastic
+  uses `plastic`/`rigid_plastic` for RDF; clean straws and disposable plastic
+  spoons retain their approved RDF subtypes. Contaminated or unknown-condition
+  plastic falls back to Bin 1. Resin codes are emitted only for legible marks.
 
-The reported kiosk scan ID `5ccd0ad2-506d-478e-800e-dbe7c2c730dc` was not
-present in the accessible persistent Scan History, so its image could not be
-used as a regression image. A synthetic clean-straw classification fixture is
-covered by the focused config/parser/mapping tests instead.
+The reported kiosk scan ID `d1e35391-399f-4edc-9130-bbe3c3108938` was not
+present in the accessible workspace files, so its saved image could not be
+used as a regression image. A face-only/no-waste fixture covers this failure
+mode alongside the existing genuine-waste regression set.
 
 ## Run the deterministic prompt regression set
 

@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "location_id": "ICT-001",
   "location_name": "ICT Kiosk",
-  "mapping_version": "ICT-10-bin-v3",
+  "mapping_version": "ICT-10-bin-v4",
   "enabled": true,
   "classification_policy": {
     "confidence_threshold": 0.7,
@@ -126,7 +126,7 @@
     "infectious": "ICT-001-B10"
   },
   "mapping_rulebook": {
-    "version": "ICT-physical-bin-rules-v1",
+    "version": "ICT-physical-bin-rules-v2",
     "ordered_rules": [
       {
         "id": "infectious",
@@ -182,10 +182,12 @@
           "non_recyclable_foam",
           "plastic_coated_paper",
           "non_recyclable_dry_plastic",
+          "rigid_plastic",
           "plastic_straw",
           "plastic_spoon"
         ],
         "mapping_reason_by_material_subtype": {
+          "rigid_plastic": "clean_dry_rigid_plastic_rdf",
           "plastic_straw": "clean_dry_plastic_straw_rdf",
           "plastic_spoon": "clean_dry_plastic_spoon_rdf"
         },

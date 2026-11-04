@@ -42,7 +42,15 @@ missing or invalid values normalize to `unknown`. Material subtypes are
 category, subtype, and confidence. Bin or disposal fields from the model are
 ignored. The active prompt version is returned at the response root and in
 `prediction.prompt_version`, persisted in inference records, and exposed in Scan
-History. The default is `qwen-waste-classification-v5`.
+History. The default is `qwen-waste-classification-v7`.
+
+The prompt requires a clearly visible physical waste object and visible
+material/shape evidence before classifying PET, glass, metal, paper, or plastic.
+If no identifiable waste object is visible, the backend returns
+`status: "no_waste_detected"`, `classification_status: "invalid_capture"`,
+`valid_prediction: false`, no bin fields, and the retry message
+`ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่`. This invalid capture is not a
+classification and is never routed through the Bin 1 unknown fallback.
 
 Each candidate contains `object_name_th`, `waste_category`,
 `material_subtype`, and confidence from 0 to 1. Candidate 1 is normalized to
@@ -68,7 +76,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
 ```json
 {
   "request_id": "uuid",
-  "prompt_version": "qwen-waste-classification-v5",
+  "prompt_version": "qwen-waste-classification-v7",
   "location_id": "ICT-001",
   "prediction": {
     "object_name_th": "กระดาษทิชชู่ใช้แล้ว",
@@ -76,7 +84,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
     "material_subtype": "paper",
     "resin_identification_code": "unknown",
     "visible_condition": "clean_dry",
-    "prompt_version": "qwen-waste-classification-v5",
+    "prompt_version": "qwen-waste-classification-v7",
     "top_candidates": [
       { "object_name_th": "กระดาษทิชชู่ใช้แล้ว", "waste_category": "paper", "material_subtype": "paper", "confidence": 0.9 },
       { "object_name_th": "กระดาษ", "waste_category": "paper", "material_subtype": "cardboard", "confidence": 0.4 },
@@ -95,7 +103,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
     "number": 4,
     "nameTh": "กระดาษ",
     "wasteType": "paper",
-    "mappingVersion": "ICT-10-bin-v3",
+    "mappingVersion": "ICT-10-bin-v4",
     "fallback": false
   },
   "mappingDecision": {
@@ -117,7 +125,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
   "bin_id": "ICT-001-B04",
   "bin_number": 4,
   "bin_name": "กระดาษ",
-  "mapping_version": "ICT-10-bin-v3",
+  "mapping_version": "ICT-10-bin-v4",
   "classification_status": "confirmed",
   "mapping_fallback": false,
   "mapping_reason": "clean_dry_recyclable_material",
@@ -154,43 +162,45 @@ The backend applies the ordered rules in `mapping_rulebook.ordered_rules`:
 1. `infectious` → bin 10.
 2. `hazardous` → bin 9.
 3. `ewaste` → bin 7.
-4. Clean, dry recyclables map by `material_subtype`: `pet_bottle` → 2,
-   `stretch_plastic` → 3, `paper`/`cardboard` → 4, `glass` → 5, and `metal` → 6.
-5. Clean, dry `plastic` items with `material_subtype: "plastic_straw"` or
-   `"plastic_spoon"` map to bin 8 with subtype-specific reasons
+4. Clean, dry subtype routes apply: `pet_bottle` → bin 2,
+   `stretch_plastic` → bin 3, `paper`/`cardboard` → bin 4, `glass` → bin 5,
+   and `metal` → bin 6.
+5. Clean, dry `plastic`/`rigid_plastic` maps to RDF bin 8 with reason
+   `clean_dry_rigid_plastic_rdf`. Clean, dry `plastic_straw` and
+   `plastic_spoon` remain approved RDF subtypes with reasons
    `clean_dry_plastic_straw_rdf` and `clean_dry_plastic_spoon_rdf`.
-   Contaminated items do not match this rule. Other configured RDF materials
-   continue to use their explicit allowlist.
-6. Unmatched, unsupported, unknown-condition, and invalidly contaminated items
-   use bin 1.
+   Existing approved RDF packaging subtypes remain on the explicit allowlist.
+6. For ICT-001 plastic-family items, visible food/liquid contamination, inability
+   to clean, or unknown condition routes to general/landfill bin 1. Unmatched
+   materials and unknown/low-confidence classifications use the configured bin
+   1 fallback.
 
-`rigid_plastic` is prohibited from the ICT-001 RDF subtype allowlist and does
-not map to bin 8. Food/liquid-contaminated straws and spoons do not match the
-clean/dry RDF rule; with no supported item-specific preparation rule they
-follow the existing safe fallback.
+The ICT-001 definitions are: bin 2 accepts clean, dry PET beverage bottles;
+bin 3 accepts clean, dry flexible film/bags only (carrier bags, soup/ice bags,
+produce bags, cling film, shrink/stretch film around packs, bubble wrap, and
+zip-lock bags). Rigid containers, bottles, cups, spoons, straws, jars, and hard
+packaging are never stretch plastic. Bin 8 accepts clean, dry plastic or
+packaging not accepted by bins 2 or 3, subject to its approved RDF subtype
+allowlist; PET bottles and stretch plastic are excluded.
 
-When a beverage-bottle object name is present with validated resin code `1`,
-the backend normalizes its category and subtype to `pet_bottle`; a generic
-container name alone is insufficient. A contradictory `pet_bottle` category
-with `rigid_plastic` subtype is normalized to `plastic`/`rigid_plastic`. The
-existing confidence threshold still applies. The global physical-bin mapping
-remains `pet_bottle` → Bin 2.
+PET bottle identification requires visible beverage-bottle and plastic-body
+evidence. Resin identification codes are returned only when legible; appearance
+alone never supplies a resin code. A generic container name alone is
+insufficient. A contradictory `pet_bottle` category with `rigid_plastic`
+subtype is normalized to `plastic`/`rigid_plastic`. The existing confidence
+threshold still applies. For other plastic materials, `waste_category` remains
+`plastic` and the separate `material_subtype` selects the local route.
 
 For a location with `mapping_rulebook`, `/predict` does not use the legacy
 `category_mapping` shortcut. That field remains for older review/reference
 consumers; the rulebook is authoritative for inference responses.
 
-`plastic` alone never selects bin 3. `rigid_plastic` and
-`multilayer_packaging` do not map to bin 3. A recyclable object with visible
-food/liquid contamination receives the configured preparation flow first; a
-material destination is returned only when that flow is enabled for the
-category and the subtype has a valid rule. `visible_condition: "unknown"` is
-never treated as clean and dry.
-
-The repository has no ICT-001 bin-8 sticker image or verified accepted-material
-list. Therefore the live RDF rule currently has empty
-`eligible_material_subtypes` and `eligible_object_names_th` lists and safely
-falls back to bin 1. Add RDF items only after confirming the physical sticker.
+`plastic` alone never selects bin 3; visible flexible-film/bag evidence is
+required for subtype `stretch_plastic`. Rigid plastic and hard packaging never
+map to bin 3. Clean, dry rigid plastic maps to bin 8. Contaminated or
+unknown-condition plastic bypasses preparation routing and uses bin 1; it is
+never sent directly to RDF. `visible_condition: "unknown"` is not clean and
+dry.
 
 The infectious low-confidence rule is location-configured and exact-name based.
 For ICT-001, configured aliases such as `หน้ากากอนามัย`, `ชุดตรวจ ATK`,
@@ -326,7 +336,7 @@ Confirmed preparation example for a glass container:
       "bin_id": "ICT-001-B05",
       "bin_number": 5,
       "bin_name": "ขวดแก้ว",
-      "mapping_version": "ICT-10-bin-v3"
+      "mapping_version": "ICT-10-bin-v4"
     },
     "steps": [
       {
@@ -380,7 +390,7 @@ location-specific bin.
   "bin_id": "ICT-001-B01",
   "bin_number": 1,
   "bin_name": "ขยะทั่วไป (ขยะฝังกลบ)",
-  "mapping_version": "ICT-10-bin-v3",
+  "mapping_version": "ICT-10-bin-v4",
   "classification_status": "unknown",
   "mapping_fallback": true,
   "status": "unknown"
@@ -423,7 +433,7 @@ Model/API failures return HTTP 502 with a structured response:
   "bin_id": null,
   "bin_number": null,
   "bin_name": null,
-  "mapping_version": "ICT-10-bin-v3",
+  "mapping_version": "ICT-10-bin-v4",
   "classification_status": "api_error",
   "mapping_fallback": false,
   "status": "api_error",

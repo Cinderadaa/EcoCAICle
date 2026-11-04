@@ -28,7 +28,7 @@ Supported settings:
 | `ECOAICLE_STORAGE_ROOT` | `/tmp/ecoaicle-phase4-data` | Approved filesystem root; must be outside the source repository. |
 | `ECOAICLE_MAX_IMAGE_BYTES` | `10485760` | Maximum accepted upload size; hard limit is `104857600`. |
 | `ECOAICLE_RETENTION_DAYS` | unset | Advisory metadata only. No automatic deletion is performed. |
-| `ECOCAICLE_PROMPT_VERSION` | `qwen-waste-classification-v5` | Optional prompt identifier override; returned by `/predict` and persisted with inference/Scan History metadata. |
+| `ECOCAICLE_PROMPT_VERSION` | `qwen-waste-classification-v7` | Optional prompt identifier override; returned by `/predict` and persisted with inference/Scan History metadata. |
 
 The backend reads the storage configuration at process startup. Configuration
 changes require a controlled backend restart; there is no hot reload.
@@ -91,7 +91,7 @@ Example sanitized record:
   "bin_id": "ICT-001-B05",
   "bin_number": 5,
   "bin_name": "ขวดแก้ว",
-  "mapping_version": "ICT-10-bin-v3",
+  "mapping_version": "ICT-10-bin-v4",
   "classification_status": "confirmed",
   "mapping_fallback": false,
   "mapping_reason": "clean_dry_recyclable_material",
@@ -104,7 +104,7 @@ Example sanitized record:
   },
   "status": "success",
   "model_identifier": "qwen3.8:27b",
-  "prompt_version": "qwen-waste-classification-v5",
+  "prompt_version": "qwen-waste-classification-v7",
   "inference_latency_ms": 120.324,
   "total_latency_ms": 137.338,
   "error_type": null,
@@ -136,10 +136,13 @@ API-error outcomes (`mapping_not_resolved` for transport/model errors). When gla
 bottle candidates both appear, `glass_pet_review_required` is true and the
 confidence gap is recorded. A gap of 0.15 or less is marked as close.
 
-`material_subtype` is persisted as the normalized model subtype, including the
-explicit `plastic_straw` and `plastic_spoon` values. For ICT-001, only a clean,
-dry plastic straw or disposable plastic spoon uses the matching item-specific
-RDF reason to Bin 8; generic `rigid_plastic` remains ineligible.
+`material_subtype` is persisted separately from `waste_category`. For ICT-001,
+clean, dry PET beverage bottles map to Bin 2; visibly flexible clean, dry film
+and bags map to Bin 3; and clean, dry rigid plastic maps to Bin 8 with reason
+`clean_dry_rigid_plastic_rdf`. Clean, dry plastic straws and disposable plastic
+spoons retain their approved subtype-specific Bin 8 reasons. PET bottles and
+stretch plastic are excluded from RDF. Contaminated, uncleanable, or
+unknown-condition plastic routes to Bin 1.
 
 ## Ground-truth review preparation
 

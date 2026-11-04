@@ -1,0 +1,19 @@
+{
+  "request_id": "d1e35391-399f-4edc-9130-bbe3c3108938",
+  "fixture_kind": "face-only/no-waste frame (stored image was not accessible)",
+  "model_response": {
+    "object_name_th": "ไม่พบขยะในภาพ",
+    "waste_category": "unknown",
+    "material_subtype": "unknown",
+    "resin_identification_code": "unknown",
+    "visible_condition": "unknown",
+    "confidence": 0.1,
+    "top_candidates": [
+      {"object_name_th": "ไม่พบขยะในภาพ", "waste_category": "unknown", "material_subtype": "unknown", "confidence": 0.1},
+      {"object_name_th": "ไม่พบขยะในภาพ", "waste_category": "unknown", "material_subtype": "unknown", "confidence": 0.05},
+      {"object_name_th": "ไม่พบขยะในภาพ", "waste_category": "unknown", "material_subtype": "unknown", "confidence": 0.0}
+    ],
+    "has_food_scraps": false,
+    "has_liquid": false
+  }
+}
