@@ -97,7 +97,7 @@ class LocationMappingConfig:
     unknown_fallback_enabled: bool
     unknown_fallback_bin_id: Optional[str]
     unknown_fallback_statuses: frozenset[str]
-    infectious_low_confidence_override: Mapping[str, Any]
+    object_name_overrides: tuple[Mapping[str, Any], ...]
     food_contamination_flow: Mapping[str, Any]
     preparation: Mapping[str, Any]
 
@@ -131,6 +131,39 @@ def normalize_object_name_th(value: object) -> str:
     return unicodedata.normalize("NFC", " ".join(value.casefold().split()))
 
 
+def match_configured_object_name_alias(
+    object_name_th: object,
+    aliases: object,
+) -> Optional[str]:
+    """Return the configured alias found within a normalized object name."""
+    normalized_name = normalize_object_name_th(object_name_th)
+    if not normalized_name or not isinstance(aliases, (list, tuple, set, frozenset)):
+        return None
+    for alias in aliases:
+        normalized_alias = normalize_object_name_th(alias)
+        if normalized_alias and normalized_alias in normalized_name:
+            return normalized_alias
+    return None
+
+
+def configured_object_name_override(
+    object_name_th: object,
+    overrides: object,
+) -> Optional[Mapping[str, Any]]:
+    """Return the first enabled location rule matching the primary object name."""
+    if not isinstance(overrides, (list, tuple)):
+        return None
+    for override in overrides:
+        if not isinstance(override, Mapping) or override.get("enabled") is not True:
+            continue
+        if match_configured_object_name_alias(
+            object_name_th,
+            override.get("object_name_th_aliases", ()),
+        ) is not None:
+            return override
+    return None
+
+
 def normalize_prediction_waste_type(category: object, item_name: object = None) -> str:
     """Normalize the model-selected category without deriving it from an object name."""
 
@@ -158,54 +191,77 @@ def _finite_number(value: object, field_name: str) -> float:
     return numeric_value
 
 
-def _validate_infectious_low_confidence_override(
-    raw_rule: object,
+def _validate_object_name_overrides(
+    raw_overrides: object,
     *,
-    confidence_threshold: float,
-) -> Mapping[str, Any]:
-    if raw_rule is None:
-        return MappingProxyType({"enabled": False})
-    if not isinstance(raw_rule, Mapping):
-        raise MappingConfigError(
-            "classification_policy.infectious_low_confidence_override must be an object"
+    bins: Mapping[str, BinDefinition],
+    category_mapping: Mapping[str, str],
+) -> tuple[Mapping[str, Any], ...]:
+    field_prefix = "object_name_overrides"
+    if raw_overrides is None:
+        return ()
+    if not isinstance(raw_overrides, list):
+        raise MappingConfigError(f"{field_prefix} must be an ordered array")
+
+    overrides: list[Mapping[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw_rule in enumerate(raw_overrides):
+        prefix = f"{field_prefix}[{index}]"
+        if not isinstance(raw_rule, Mapping):
+            raise MappingConfigError(f"{prefix} must be an object")
+        rule_id = _non_empty_string(raw_rule.get("id"), f"{prefix}.id")
+        if rule_id in seen_ids:
+            raise MappingConfigError(f"{field_prefix} contains duplicate id {rule_id!r}")
+        seen_ids.add(rule_id)
+        enabled = _boolean(raw_rule.get("enabled"), f"{prefix}.enabled")
+        match_type = _non_empty_string(raw_rule.get("match_type"), f"{prefix}.match_type")
+        if match_type != "contains":
+            raise MappingConfigError(f"{prefix}.match_type must be 'contains'")
+
+        raw_aliases = raw_rule.get("object_name_th_aliases")
+        if not isinstance(raw_aliases, list) or not raw_aliases:
+            raise MappingConfigError(f"{prefix}.object_name_th_aliases must be a non-empty array")
+        aliases: list[str] = []
+        for alias_index, raw_alias in enumerate(raw_aliases):
+            alias = normalize_object_name_th(
+                _non_empty_string(raw_alias, f"{prefix}.object_name_th_aliases[{alias_index}]")
+            )
+            if alias in aliases:
+                raise MappingConfigError(f"{prefix}.object_name_th_aliases contains a duplicate")
+            aliases.append(alias)
+
+        category = normalize_waste_category(raw_rule.get("waste_category"))
+        subtype = normalize_material_subtype(raw_rule.get("material_subtype"))
+        if category == "unknown" or subtype == "unknown":
+            raise MappingConfigError(f"{prefix} must target a supported category and subtype")
+        bin_id = _non_empty_string(raw_rule.get("bin_id"), f"{prefix}.bin_id")
+        if bin_id not in bins or not bins[bin_id].enabled:
+            raise MappingConfigError(f"{prefix}.bin_id must reference an enabled configured bin")
+        if category_mapping.get(category) != bin_id:
+            raise MappingConfigError(f"{prefix}.bin_id must agree with category_mapping.{category}")
+        minimum_confidence = _finite_number(
+            raw_rule.get("minimum_confidence"), f"{prefix}.minimum_confidence"
         )
-
-    field_prefix = "classification_policy.infectious_low_confidence_override"
-    enabled = _boolean(raw_rule.get("enabled"), f"{field_prefix}.enabled")
-    waste_category = _non_empty_string(raw_rule.get("waste_category"), f"{field_prefix}.waste_category")
-    if waste_category != "infectious":
-        raise MappingConfigError(f"{field_prefix}.waste_category must be 'infectious'")
-    override_threshold = _finite_number(
-        raw_rule.get("confidence_threshold"),
-        f"{field_prefix}.confidence_threshold",
-    )
-    if not 0 <= override_threshold <= 1:
-        raise MappingConfigError(f"{field_prefix}.confidence_threshold must be between 0 and 1")
-    if override_threshold >= confidence_threshold:
-        raise MappingConfigError(
-            f"{field_prefix}.confidence_threshold must be below the global confidence threshold"
+        if not 0 <= minimum_confidence <= 1:
+            raise MappingConfigError(f"{prefix}.minimum_confidence must be between 0 and 1")
+        bypass_threshold = _boolean(
+            raw_rule.get("bypass_confidence_threshold"),
+            f"{prefix}.bypass_confidence_threshold",
         )
-
-    raw_names = raw_rule.get("object_name_th_allowlist")
-    if not isinstance(raw_names, list) or not raw_names:
-        raise MappingConfigError(f"{field_prefix}.object_name_th_allowlist must be a non-empty array")
-    allowlist: list[str] = []
-    for index, raw_name in enumerate(raw_names):
-        name = _non_empty_string(raw_name, f"{field_prefix}.object_name_th_allowlist[{index}]")
-        normalized_name = normalize_object_name_th(name)
-        if normalized_name in allowlist:
-            raise MappingConfigError(f"{field_prefix}.object_name_th_allowlist contains a duplicate name")
-        allowlist.append(normalized_name)
-
-    mapping_reason = _non_empty_string(raw_rule.get("mapping_reason"), f"{field_prefix}.mapping_reason")
-
-    return MappingProxyType({
-        "enabled": enabled,
-        "waste_category": waste_category,
-        "confidence_threshold": override_threshold,
-        "object_name_th_allowlist": tuple(allowlist),
-        "mapping_reason": mapping_reason,
-    })
+        mapping_reason = _non_empty_string(raw_rule.get("mapping_reason"), f"{prefix}.mapping_reason")
+        overrides.append(MappingProxyType({
+            "id": rule_id,
+            "enabled": enabled,
+            "match_type": match_type,
+            "object_name_th_aliases": tuple(aliases),
+            "waste_category": category,
+            "material_subtype": subtype,
+            "bin_id": bin_id,
+            "minimum_confidence": minimum_confidence,
+            "bypass_confidence_threshold": bypass_threshold,
+            "mapping_reason": mapping_reason,
+        }))
+    return tuple(overrides)
 
 
 def _validate_mapping_rulebook(
@@ -216,10 +272,50 @@ def _validate_mapping_rulebook(
 ) -> Mapping[str, Any]:
     if raw_rulebook is None:
         # Compatibility for older non-ICT test/deployment configurations.
-        return MappingProxyType({"version": "legacy-category-map", "ordered_rules": ()})
+        return MappingProxyType({"version": "legacy-category-map", "ordered_rules": (), "confidence_overrides": ()})
     if not isinstance(raw_rulebook, Mapping):
         raise MappingConfigError("mapping_rulebook must be an object")
     version = _non_empty_string(raw_rulebook.get("version"), "mapping_rulebook.version")
+    raw_confidence_overrides = raw_rulebook.get("confidence_overrides", [])
+    if not isinstance(raw_confidence_overrides, list):
+        raise MappingConfigError("mapping_rulebook.confidence_overrides must be an array")
+    confidence_overrides: list[dict[str, Any]] = []
+    confidence_override_ids: set[str] = set()
+    for index, raw_override in enumerate(raw_confidence_overrides):
+        prefix = f"mapping_rulebook.confidence_overrides[{index}]"
+        if not isinstance(raw_override, Mapping):
+            raise MappingConfigError(f"{prefix} must be an object")
+        override_id = _non_empty_string(raw_override.get("id"), f"{prefix}.id")
+        if override_id != "pet_bottle_local_confidence_threshold" or override_id in confidence_override_ids:
+            raise MappingConfigError(f"{prefix}.id is unsupported or duplicated")
+        category = normalize_waste_category(raw_override.get("waste_category"))
+        subtype = normalize_material_subtype(raw_override.get("material_subtype"))
+        condition = normalize_visible_condition(raw_override.get("visible_condition"))
+        if (category, subtype, condition) != ("pet_bottle", "pet_bottle", "clean_dry"):
+            raise MappingConfigError(f"{prefix} must target clean/dry PET bottles only")
+        has_food_scraps = _boolean(raw_override.get("has_food_scraps"), f"{prefix}.has_food_scraps")
+        has_liquid = _boolean(raw_override.get("has_liquid"), f"{prefix}.has_liquid")
+        if has_food_scraps or has_liquid:
+            raise MappingConfigError(f"{prefix} must require no food scraps and no liquid")
+        threshold = _finite_number(raw_override.get("minimum_confidence"), f"{prefix}.minimum_confidence")
+        if not 0 <= threshold <= 1:
+            raise MappingConfigError(f"{prefix}.minimum_confidence must be between 0 and 1")
+        bin_id = _non_empty_string(raw_override.get("bin_id"), f"{prefix}.bin_id")
+        if bin_id not in bins or not bins[bin_id].enabled or bins[bin_id].bin_number != 2:
+            raise MappingConfigError(f"{prefix}.bin_id must reference enabled Bin 2")
+        confidence_overrides.append({
+            "id": override_id,
+            "waste_category": category,
+            "material_subtype": subtype,
+            "visible_condition": condition,
+            "has_food_scraps": has_food_scraps,
+            "has_liquid": has_liquid,
+            "minimum_confidence": threshold,
+            "bin_id": bin_id,
+            "mapping_reason": _non_empty_string(raw_override.get("mapping_reason"), f"{prefix}.mapping_reason"),
+        })
+        confidence_override_ids.add(override_id)
+
     raw_rules = raw_rulebook.get("ordered_rules")
     if not isinstance(raw_rules, list) or not raw_rules:
         raise MappingConfigError("mapping_rulebook.ordered_rules must be a non-empty array")
@@ -313,6 +409,31 @@ def _validate_mapping_rulebook(
                     if len(set(names)) != len(names):
                         raise MappingConfigError(f"{prefix}.{list_key} contains duplicate names")
                     rule[list_key] = names
+        if "minimum_confidence_by_material_subtype" in rule:
+            if rule_id != "rdf_fuel":
+                raise MappingConfigError(f"{prefix}.minimum_confidence_by_material_subtype is only supported on rdf_fuel")
+            raw_thresholds = rule["minimum_confidence_by_material_subtype"]
+            if not isinstance(raw_thresholds, Mapping):
+                raise MappingConfigError(f"{prefix}.minimum_confidence_by_material_subtype must be an object")
+            narrow_subtypes = {"rigid_plastic", "plastic_straw"}
+            eligible_subtypes = set(rule.get("eligible_material_subtypes", ()))
+            normalized_thresholds: dict[str, float] = {}
+            for raw_subtype, raw_threshold in raw_thresholds.items():
+                subtype = normalize_material_subtype(raw_subtype)
+                if subtype not in narrow_subtypes or subtype not in eligible_subtypes:
+                    raise MappingConfigError(
+                        f"{prefix}.minimum_confidence_by_material_subtype is limited to approved clean/dry RDF subtypes"
+                    )
+                threshold = _finite_number(
+                    raw_threshold,
+                    f"{prefix}.minimum_confidence_by_material_subtype.{raw_subtype}",
+                )
+                if not 0 <= threshold <= 1:
+                    raise MappingConfigError(
+                        f"{prefix}.minimum_confidence_by_material_subtype.{raw_subtype} must be between 0 and 1"
+                    )
+                normalized_thresholds[subtype] = threshold
+            rule["minimum_confidence_by_material_subtype"] = normalized_thresholds
         if "requires_preparation_path_when_contaminated" in rule:
             rule["requires_preparation_path_when_contaminated"] = _boolean(
                 rule["requires_preparation_path_when_contaminated"],
@@ -361,7 +482,11 @@ def _validate_mapping_rulebook(
     if rdf_categories.intersection({"glass", "metal", "ewaste", "hazardous", "infectious", "general"}):
         raise MappingConfigError("mapping_rulebook RDF rule includes a prohibited waste category")
 
-    return _freeze_value({"version": version, "ordered_rules": rules})
+    return _freeze_value({
+        "version": version,
+        "ordered_rules": rules,
+        "confidence_overrides": confidence_overrides,
+    })
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -621,11 +746,6 @@ def validate_location_config(
     )
     if not 0 <= confidence_threshold <= 1:
         raise MappingConfigError("classification_policy.confidence_threshold must be between 0 and 1")
-    infectious_low_confidence_override = _validate_infectious_low_confidence_override(
-        policy.get("infectious_low_confidence_override"),
-        confidence_threshold=confidence_threshold,
-    )
-
     fallback = policy.get("unknown_fallback")
     if not isinstance(fallback, Mapping):
         raise MappingConfigError("classification_policy.unknown_fallback must be an object")
@@ -732,10 +852,11 @@ def validate_location_config(
             )
         category_mapping[category] = bin_id
 
-    if infectious_low_confidence_override.get("enabled") and "infectious" not in category_mapping:
-        raise MappingConfigError(
-            "classification_policy.infectious_low_confidence_override requires a configured infectious category mapping"
-        )
+    object_name_overrides = _validate_object_name_overrides(
+        raw_config.get("object_name_overrides"),
+        bins=bins,
+        category_mapping=category_mapping,
+    )
 
     mapping_rulebook = _validate_mapping_rulebook(
         raw_config.get("mapping_rulebook"),
@@ -760,7 +881,7 @@ def validate_location_config(
         unknown_fallback_enabled=fallback_enabled,
         unknown_fallback_bin_id=fallback_bin_id,
         unknown_fallback_statuses=fallback_statuses,
-        infectious_low_confidence_override=infectious_low_confidence_override,
+        object_name_overrides=object_name_overrides,
         food_contamination_flow=food_contamination_flow,
         preparation=preparation,
     )

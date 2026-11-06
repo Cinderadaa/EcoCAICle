@@ -1,4 +1,23 @@
-export const PREDICT_TIMEOUT_MS = 30_000;
+export const PREDICT_TIMEOUT_MS = 180_000;
+export const PREDICTION_ERROR_RESET_MS = 8_000;
+
+export function getPredictionFailure(response, payload) {
+  if (!response || !payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return new Error('Prediction service returned an empty or invalid response');
+  }
+  if (!response.ok || payload.status === 'api_error') {
+    const error = new Error(payload.detail || payload.error || `Prediction failed (${response.status})`);
+    error.responseStatus = payload.status || 'api_error';
+    return error;
+  }
+  const prediction = payload.prediction && typeof payload.prediction === 'object'
+    ? payload.prediction
+    : payload;
+  if (!Array.isArray(prediction.top_candidates) || prediction.top_candidates.length !== 3) {
+    return new Error('Prediction service returned an incomplete classification');
+  }
+  return null;
+}
 
 function tracePrediction(event, cycleId, details = {}) {
   if (process.env.NODE_ENV !== 'development') return;

@@ -7,7 +7,8 @@ export const dynamic = "force-dynamic";
 const MODEL_BASE_URL =
   process.env.MODEL_BASE_URL || "http://127.0.0.1:8001";
 const LOCATION_ID = process.env.ECOCAICLE_LOCATION_ID || "ICT-001";
-const PROXY_TIMEOUT_MS = 40_000;
+// Leave room for FastAPI's own 180-second upstream deadline to return its 504.
+const PROXY_TIMEOUT_MS = 185_000;
 
 function tracePrediction(event: string, cycleId: string, details: object = {}) {
   if (process.env.NODE_ENV !== "development") return;

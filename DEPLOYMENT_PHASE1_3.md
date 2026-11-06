@@ -5,6 +5,31 @@ deploy, or change any running service.
 
 ## Verified local configuration
 
+### POC inference timeout exception
+
+The backend keeps `QWEN_PROVIDER=litellm` as its default and supports
+`QWEN_PROVIDER=ollama_native` as an opt-in route to `OLLAMA_BASE_URL`.
+`QWEN_MODEL=qwen3-vl:4b` and `QWEN_TIMEOUT_SECONDS=60` are the image defaults.
+The LiteLLM request has no configured `max_tokens` cap; the native Ollama
+request uses `think=false`, JSON schema output, and `num_predict=300`. Model
+reasoning text is never used as classification data.
+
+The current local `internal_api/.env` overrides the LiteLLM timeout to 180
+seconds as a POC exception. Native Ollama requests and the golden comparison
+use a fixed 60-second timeout. The 180-second setting does not meet the kiosk
+or production response-time requirement and is not approval for production
+rollout.
+
+Set the backend runtime variables explicitly when enabling native Ollama;
+production remains on the LiteLLM default until the golden evaluation passes:
+
+```text
+QWEN_MODEL=qwen3-vl:4b
+QWEN_PROVIDER=ollama_native
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+QWEN_TIMEOUT_SECONDS=60
+```
+
 The backend image uses `/app` as its working directory and copies `config`
 into `/app/config`. Therefore the runtime mapping file is:
 

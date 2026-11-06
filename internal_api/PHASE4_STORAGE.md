@@ -28,7 +28,7 @@ Supported settings:
 | `ECOAICLE_STORAGE_ROOT` | `/tmp/ecoaicle-phase4-data` | Approved filesystem root; must be outside the source repository. |
 | `ECOAICLE_MAX_IMAGE_BYTES` | `10485760` | Maximum accepted upload size; hard limit is `104857600`. |
 | `ECOAICLE_RETENTION_DAYS` | unset | Advisory metadata only. No automatic deletion is performed. |
-| `ECOCAICLE_PROMPT_VERSION` | `qwen-waste-classification-v7` | Optional prompt identifier override; returned by `/predict` and persisted with inference/Scan History metadata. |
+| `ECOCAICLE_PROMPT_VERSION` | `qwen-waste-classification-v9` | Optional prompt identifier override; returned by `/predict` and persisted with inference/Scan History metadata. |
 
 The backend reads the storage configuration at process startup. Configuration
 changes require a controlled backend restart; there is no hot reload.
@@ -91,10 +91,12 @@ Example sanitized record:
   "bin_id": "ICT-001-B05",
   "bin_number": 5,
   "bin_name": "ขวดแก้ว",
-  "mapping_version": "ICT-10-bin-v4",
+  "mapping_version": "ICT-10-bin-v5",
   "classification_status": "confirmed",
   "mapping_fallback": false,
   "mapping_reason": "clean_dry_recyclable_material",
+  "mapping_rule_name": null,
+  "confidence_threshold_used": null,
   "review_flags": {
     "glass_pet_review_required": false,
     "glass_pet_candidates_present": false,
@@ -104,7 +106,7 @@ Example sanitized record:
   },
   "status": "success",
   "model_identifier": "qwen3.8:27b",
-  "prompt_version": "qwen-waste-classification-v7",
+  "prompt_version": "qwen-waste-classification-v9",
   "inference_latency_ms": 120.324,
   "total_latency_ms": 137.338,
   "error_type": null,
@@ -112,11 +114,29 @@ Example sanitized record:
 }
 ```
 
-Inference records also persist `mapping_reason`. For ICT-001, an allowlisted
+Inference records also persist `mapping_reason`, `mapping_rule_name`, and
+`confidence_threshold_used`; Scan History returns the same audit fields. The
+POC-only PET confidence rule records `mapping_rule_name:
+"pet_bottle_local_confidence_threshold"` and `confidence_threshold_used: 0.6`
+when a clean/dry PET bottle with no food scraps or liquid routes to Bin 2.
+This rule does not change the global `0.7` confidence threshold.
+
+For ICT-001, an allowlisted
 infectious item accepted at confidence `0.50` to below `0.70` is still recorded
 with `classification_status: "low_confidence"`, `mapping_fallback: false`, and
 `mapping_reason: "infectious_safety_override"`. Scan History includes the field
 in metadata and marks the record with an `infectious safety override` chip.
+
+ICT-001 also applies the configured e-waste name aliases `โทรศัพท์มือถือ` and
+`มือถือ` anywhere within a normalized Thai object name. A match sets the
+classification to `ewaste` / `e_waste` and records
+`mapping_reason: "local_ewaste_alias_override"` in the response and inference
+record. The explicit phone alias also routes to the configured e-waste bin when
+model confidence is below the general threshold; that result remains marked
+`low_confidence` and is not a generic fallback. Other categories keep their
+existing thresholds and mapping behavior. Location mapping configuration is
+loaded at backend startup; restart the backend after changing this alias list
+or its override settings.
 
 Prediction startup requires the configured storage root to initialize. Each
 valid image is saved before it is sent to the model. If saving fails, the

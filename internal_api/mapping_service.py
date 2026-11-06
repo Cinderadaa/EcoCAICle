@@ -9,6 +9,7 @@ from typing import Optional
 try:  # Supports both ``python -m internal_api...`` and the Docker working dir.
     from .mapping_config import (
         LocationMappingConfig,
+        configured_object_name_override,
         normalize_material_subtype,
         normalize_object_name_th,
         normalize_visible_condition,
@@ -17,6 +18,7 @@ try:  # Supports both ``python -m internal_api...`` and the Docker working dir.
 except ImportError:  # pragma: no cover - exercised when running from internal_api/
     from mapping_config import (
         LocationMappingConfig,
+        configured_object_name_override,
         normalize_material_subtype,
         normalize_object_name_th,
         normalize_visible_condition,
@@ -37,6 +39,9 @@ class MappingDecision:
     classification_status: str
     mapping_fallback: bool
     mapping_reason: Optional[str] = None
+    object_name_override_applied: bool = False
+    mapping_rule_name: Optional[str] = None
+    confidence_threshold_used: Optional[float] = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -47,6 +52,9 @@ class MappingDecision:
             "classification_status": self.classification_status,
             "mapping_fallback": self.mapping_fallback,
             "mapping_reason": self.mapping_reason,
+            "object_name_override_applied": self.object_name_override_applied,
+            "mapping_rule_name": self.mapping_rule_name,
+            "confidence_threshold_used": self.confidence_threshold_used,
         }
 
 
@@ -130,36 +138,58 @@ class MappingService:
             normalized_condition = "food_or_liquid_contaminated"
         normalized_confidence = _coerce_confidence(confidence)
         rulebook_rules = self.config.mapping_rulebook.get("ordered_rules", ())
-
-        override = self.config.infectious_low_confidence_override
-        normalized_object_name = normalize_object_name_th(object_name_th)
-        if (
-            normalized_category == override.get("waste_category")
-            and normalized_confidence is not None
-            and self.config.confidence_threshold > normalized_confidence
-            and normalized_confidence >= override.get("confidence_threshold", 1.0)
-            and override.get("enabled") is True
-            and normalized_object_name in override.get("object_name_th_allowlist", ())
-        ):
-            infectious_rule = next(
-                (rule for rule in rulebook_rules if rule.get("id") == "infectious"),
-                None,
+        override = configured_object_name_override(object_name_th, self.config.object_name_overrides)
+        if override:
+            normalized_category = override["waste_category"]
+            normalized_subtype = override["material_subtype"]
+            meets_override_confidence = (
+                normalized_confidence is not None
+                and normalized_confidence >= override["minimum_confidence"]
             )
-            bin_id = (
-                infectious_rule.get("bin_id") if infectious_rule
-                else self.config.category_mapping.get(normalized_category)
-            )
-            if bin_id is not None:
-                return self._infectious_safety_override(
+            if override["bypass_confidence_threshold"] or meets_override_confidence:
+                bin_id = override["bin_id"]
+                if (
+                    normalized_confidence is None
+                    or normalized_confidence < self.config.confidence_threshold
+                ):
+                    return self._low_confidence_local_override(
+                        bin_id,
+                        mapping_reason=override["mapping_reason"],
+                    )
+                return self._confirmed(
                     bin_id,
                     mapping_reason=override["mapping_reason"],
+                    object_name_override_applied=True,
                 )
 
+        for rule in self.config.mapping_rulebook.get("confidence_overrides", ()):
+            if (
+                normalized_category == rule["waste_category"]
+                and normalized_subtype == rule["material_subtype"]
+                and normalized_condition == rule["visible_condition"]
+                and has_food_scraps is rule["has_food_scraps"]
+                and has_liquid is rule["has_liquid"]
+                and normalized_confidence is not None
+                and normalized_confidence >= rule["minimum_confidence"]
+                and normalized_confidence < self.config.confidence_threshold
+            ):
+                return self._confirmed(
+                    rule["bin_id"],
+                    mapping_reason=rule["mapping_reason"],
+                    mapping_rule_name=rule["id"],
+                    confidence_threshold_used=rule["minimum_confidence"],
+                )
+
+        confidence_threshold = self._confidence_threshold_for(
+            normalized_category,
+            normalized_subtype,
+            normalized_condition,
+        )
         if normalized_category == "unknown":
             classification_status = "unknown"
         elif (
             normalized_confidence is None
-            or normalized_confidence < self.config.confidence_threshold
+            or normalized_confidence < confidence_threshold
         ):
             classification_status = "low_confidence"
         else:
@@ -282,6 +312,29 @@ class MappingService:
                 visible_condition=normalized_condition,
             ),
         )
+
+    def _confidence_threshold_for(
+        self,
+        waste_category: str,
+        material_subtype: str,
+        visible_condition: str,
+    ) -> float:
+        """Return the global threshold unless an RDF rule narrowly lowers it.
+
+        The per-subtype value applies only when the RDF rule itself would accept
+        the item: plastic category, clean/dry condition, and a configured subtype.
+        """
+        for rule in self.config.mapping_rulebook.get("ordered_rules", ()):
+            if rule.get("id") != "rdf_fuel":
+                continue
+            overrides = rule.get("minimum_confidence_by_material_subtype", {})
+            if (
+                material_subtype in overrides
+                and waste_category in rule.get("waste_categories", ())
+                and visible_condition in rule.get("visible_conditions", ())
+            ):
+                return overrides[material_subtype]
+        return self.config.confidence_threshold
 
     def _has_preparation_path(
         self,
@@ -467,7 +520,15 @@ class MappingService:
             **base_kwargs,
         )
 
-    def _confirmed(self, bin_id: str, *, mapping_reason: str) -> MappingDecision:
+    def _confirmed(
+        self,
+        bin_id: str,
+        *,
+        mapping_reason: str,
+        object_name_override_applied: bool = False,
+        mapping_rule_name: Optional[str] = None,
+        confidence_threshold_used: Optional[float] = None,
+    ) -> MappingDecision:
         bin_definition = self.config.bins[bin_id]
         return MappingDecision(
             bin_id=bin_definition.bin_id,
@@ -477,6 +538,9 @@ class MappingService:
             classification_status="confirmed",
             mapping_fallback=False,
             mapping_reason=mapping_reason,
+            object_name_override_applied=object_name_override_applied,
+            mapping_rule_name=mapping_rule_name,
+            confidence_threshold_used=confidence_threshold_used,
         )
 
     def _fallback(
@@ -497,7 +561,7 @@ class MappingService:
             mapping_reason=mapping_reason,
         )
 
-    def _infectious_safety_override(self, bin_id: str, *, mapping_reason: str) -> MappingDecision:
+    def _low_confidence_local_override(self, bin_id: str, *, mapping_reason: str) -> MappingDecision:
         bin_definition = self.config.bins[bin_id]
         return MappingDecision(
             bin_id=bin_definition.bin_id,
@@ -507,6 +571,7 @@ class MappingService:
             classification_status="low_confidence",
             mapping_fallback=False,
             mapping_reason=mapping_reason,
+            object_name_override_applied=True,
         )
 
     def _unavailable(self) -> MappingDecision:

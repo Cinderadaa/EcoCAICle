@@ -32,8 +32,8 @@ client-supplied location is accepted or trusted.
 
 Qwen's classification JSON requires `object_name_th`, `waste_category`,
 `material_subtype`, `resin_identification_code`, `visible_condition`,
-`confidence`, `top_candidates` (exactly three), `has_food_scraps`, and
-`has_liquid`. The resin code is one of the strings `1` through `7` or `unknown`;
+`visible_object_detected`, `classification_reason`, `confidence`,
+`top_candidates` (exactly three), `has_food_scraps`, and `has_liquid`. The resin code is one of the strings `1` through `7` or `unknown`;
 missing or invalid values normalize to `unknown`. Material subtypes are
 `pet_bottle`, `stretch_plastic`, `rigid_plastic`, `multilayer_packaging`,
 `plastic_straw`, `plastic_spoon`, `paper`, `cardboard`, `glass`, `metal`, `e_waste`, `hazardous`, `infectious`,
@@ -42,15 +42,17 @@ missing or invalid values normalize to `unknown`. Material subtypes are
 category, subtype, and confidence. Bin or disposal fields from the model are
 ignored. The active prompt version is returned at the response root and in
 `prediction.prompt_version`, persisted in inference records, and exposed in Scan
-History. The default is `qwen-waste-classification-v7`.
+History. The default is `qwen-waste-classification-v9`.
 
-The prompt requires a clearly visible physical waste object and visible
-material/shape evidence before classifying PET, glass, metal, paper, or plastic.
-If no identifiable waste object is visible, the backend returns
+`visible_object_detected: false` is reserved for a genuinely absent intended
+object (empty scene, only person/background, or unusable occlusion). In that
+case the backend returns
 `status: "no_waste_detected"`, `classification_status: "invalid_capture"`,
 `valid_prediction: false`, no bin fields, and the retry message
-`ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่`. This invalid capture is not a
-classification and is never routed through the Bin 1 unknown fallback.
+`ไม่พบวัตถุสำหรับคัดแยกในภาพ`. A distinct visible but unsupported or uncertain
+object is named when possible and returned as category/subtype `unknown` with
+`classification_reason: "visible_object_unclassified"`; it is a normal unknown
+classification and follows the existing safe fallback path, not invalid capture.
 
 Each candidate contains `object_name_th`, `waste_category`,
 `material_subtype`, and confidence from 0 to 1. Candidate 1 is normalized to
@@ -76,7 +78,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
 ```json
 {
   "request_id": "uuid",
-  "prompt_version": "qwen-waste-classification-v7",
+  "prompt_version": "qwen-waste-classification-v9",
   "location_id": "ICT-001",
   "prediction": {
     "object_name_th": "กระดาษทิชชู่ใช้แล้ว",
@@ -84,7 +86,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
     "material_subtype": "paper",
     "resin_identification_code": "unknown",
     "visible_condition": "clean_dry",
-    "prompt_version": "qwen-waste-classification-v7",
+    "prompt_version": "qwen-waste-classification-v9",
     "top_candidates": [
       { "object_name_th": "กระดาษทิชชู่ใช้แล้ว", "waste_category": "paper", "material_subtype": "paper", "confidence": 0.9 },
       { "object_name_th": "กระดาษ", "waste_category": "paper", "material_subtype": "cardboard", "confidence": 0.4 },
@@ -103,7 +105,7 @@ The response additionally contains a canonical `mappedBin` object. Legacy
     "number": 4,
     "nameTh": "กระดาษ",
     "wasteType": "paper",
-    "mappingVersion": "ICT-10-bin-v4",
+    "mappingVersion": "ICT-10-bin-v5",
     "fallback": false
   },
   "mappingDecision": {
@@ -114,7 +116,9 @@ The response additionally contains a canonical `mappedBin` object. Legacy
     "mappingFallback": false,
     "classificationStatus": "confirmed",
     "mappingKeyUsed": "paper",
-    "mappingReason": "clean_dry_recyclable_material"
+    "mappingReason": "clean_dry_recyclable_material",
+    "mappingRuleName": null,
+    "confidenceThresholdUsed": null
   },
   "classificationStatus": "confirmed",
   "rawCategory": "paper",
@@ -125,10 +129,12 @@ The response additionally contains a canonical `mappedBin` object. Legacy
   "bin_id": "ICT-001-B04",
   "bin_number": 4,
   "bin_name": "กระดาษ",
-  "mapping_version": "ICT-10-bin-v4",
+  "mapping_version": "ICT-10-bin-v5",
   "classification_status": "confirmed",
   "mapping_fallback": false,
   "mapping_reason": "clean_dry_recyclable_material",
+  "mapping_rule_name": null,
+  "confidence_threshold_used": null,
   "material_subtype": "paper",
   "resin_identification_code": "unknown",
   "visible_condition": "clean_dry",
@@ -336,7 +342,7 @@ Confirmed preparation example for a glass container:
       "bin_id": "ICT-001-B05",
       "bin_number": 5,
       "bin_name": "ขวดแก้ว",
-      "mapping_version": "ICT-10-bin-v4"
+      "mapping_version": "ICT-10-bin-v5"
     },
     "steps": [
       {
@@ -390,7 +396,7 @@ location-specific bin.
   "bin_id": "ICT-001-B01",
   "bin_number": 1,
   "bin_name": "ขยะทั่วไป (ขยะฝังกลบ)",
-  "mapping_version": "ICT-10-bin-v4",
+  "mapping_version": "ICT-10-bin-v5",
   "classification_status": "unknown",
   "mapping_fallback": true,
   "status": "unknown"
@@ -433,7 +439,7 @@ Model/API failures return HTTP 502 with a structured response:
   "bin_id": null,
   "bin_number": null,
   "bin_name": null,
-  "mapping_version": "ICT-10-bin-v4",
+  "mapping_version": "ICT-10-bin-v5",
   "classification_status": "api_error",
   "mapping_fallback": false,
   "status": "api_error",

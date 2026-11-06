@@ -1,17 +1,20 @@
 # Qwen prompt-first regression experiment
 
-Current prompt version: `qwen-waste-classification-v7` (override with
+Current prompt version: `qwen-waste-classification-v11` (override with
 `ECOCAICLE_PROMPT_VERSION` when deliberately deploying a distinct prompt).
 The version is returned by `/predict`, stored in each inference record, and
 included in Scan History metadata.
 
+The v11 POC prompt is shortened and requests one-line compact JSON only, with
+no prose, Markdown, explanations, or reasoning in `content`. It requires all
+classification fields and exactly three valid, ranked candidates. The backend
+rejects a length-limited finish or incomplete/invalid JSON before mapping.
+
 ## Audit findings and changes
 
-- PET beverage bottle versus generic rigid plastic: the old prompt already
-  prohibited PET bottles from being called rigid plastic, but also suggested
-  shape/material cues in a way that could encourage guessing. The revised rules
-  make a visible resin 1/PET/PETE mark decisive, prohibit shape-only PET
-  inference, and direct unsupported material to `unknown`.
+- PET beverage bottle versus generic rigid plastic: ordinary disposable molded
+  beverage-bottle construction can support PET without a resin mark. Shape alone
+  cannot; generic rigid plastic remains a separate subtype.
 - PET versus glass: the old prompt listed both sets of cues but did not clearly
   require visible glass evidence. The revised rules require body-level glass
   evidence and explicitly reject opacity, bottle shape, contents, reflections,
@@ -26,6 +29,11 @@ included in Scan History metadata.
   object while returning category/subtype `unknown` when its material is not
   supported. It is instructed to ignore hands, people, background, caps, labels,
   and minor accessories when identifying the primary item.
+- Smartphone identification: phone-specific visual evidence such as a visible
+  screen, rear camera module, phone-shaped case, or characteristic buttons and
+  ports selects `โทรศัพท์มือถือ` / `ewaste` / `e_waste`. A rear-facing phone in a
+  black case remains eligible when its form or camera module is identifiable;
+  generic black rectangles and containers remain `unknown` without phone cues.
 - Clean disposable plastic straw: a clearly visible thin hollow drinking straw
   with visible plastic body is classified as `plastic`/`plastic_straw`. Cables,
   pens, other product tubes, and background lines are explicitly distinguished;
@@ -42,10 +50,12 @@ included in Scan History metadata.
   confidence-ranked. The parser safely normalizes candidate 1 to the primary
   prediction, preserves a usable primary result if fewer than three candidates
   arrive, and logs `top_candidates_incomplete` without retrying the request.
-- Face-only or otherwise empty captures use the explicit
-  `no_waste_detected`/`invalid_capture` result, have no bin destination, and
-  return `ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่`. This bypasses unknown
-  classification fallback mapping, including Bin 1.
+- No-object capture is now distinct from visible-but-unclassified output.
+  Only an explicit `visible_object_detected: false` with no conflicting object
+  evidence returns `no_waste_detected`/`invalid_capture` and no bin. A visible
+  object outside the supported waste taxonomy remains named, uses category and
+  subtype `unknown`, and carries `classification_reason: "visible_object_unclassified"`.
+  This follows the existing unknown fallback path.
 - ICT-001 plastic routing follows the local subtype policy: PET beverage bottles
   use `pet_bottle`; flexible film/bags use `stretch_plastic`; clean rigid plastic
   uses `plastic`/`rigid_plastic` for RDF; clean straws and disposable plastic

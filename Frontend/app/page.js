@@ -10,7 +10,12 @@ import {
   TT_STATES,
 } from '@/lib/ttState';
 import { WASTE_TYPE, normalizeClassificationResponse } from '@/lib/wasteClassification';
-import { PREDICT_TIMEOUT_MS, requestPrediction } from '@/lib/predictRequest';
+import {
+  getPredictionFailure,
+  PREDICTION_ERROR_RESET_MS,
+  PREDICT_TIMEOUT_MS,
+  requestPrediction,
+} from '@/lib/predictRequest';
 import {
   attachCameraVideo,
   getLiveCameraStream,
@@ -31,9 +36,6 @@ const PRESENCE_STABLE_MS = 150;
 const PRESENCE_FRAME_WIDTH = 64;
 const PRESENCE_FRAME_HEIGHT = 48;
 const ERROR_RESET_DELAY_MS = 2_500;
-// The browser gives the upstream 40-second deadline room to finish after its
-// own 30-second timeout, before allowing a new automatic capture cycle.
-const TIMEOUT_RESET_DELAY_MS = 15_000;
 
 function traceScanEvent(event, cycleId, details = {}) {
   if (process.env.NODE_ENV !== 'development') return;
@@ -341,12 +343,25 @@ export default function Page() {
       clearTimeout(cameraRetryTimerRef.current);
       cameraRetryTimerRef.current = null;
     }
+    if (cameraInitRetryTimerRef.current !== null) {
+      clearTimeout(cameraInitRetryTimerRef.current);
+      cameraInitRetryTimerRef.current = null;
+    }
+    if (screenTransitionTimerRef.current !== null) {
+      clearTimeout(screenTransitionTimerRef.current);
+      screenTransitionTimerRef.current = null;
+    }
 
     resetCaptureGuards();
+    cameraRetryAtRef.current = 0;
+    cameraRetryAttemptRef.current = 0;
+    cameraWarmedRef.current = false;
     capturedImageRef.current = '';
     setCapturedImage('');
     setCapturedImageLoaded(false);
     setResultData(null);
+    currentResultIndexRef.current = 0;
+    setCurrentResultIndex(0);
     sessionStorage.removeItem('tt:last');
     setSubStatus('');
     setStatus('วางขยะหน้ากล้องเพื่อเริ่มสแกน');
@@ -398,6 +413,13 @@ export default function Page() {
     }
     autoResetTimerRef.current = setTimeout(() => {
       autoResetTimerRef.current = null;
+      if (scanPhaseRef.current !== SCAN_PHASES.ERROR) {
+        traceScanEvent('scan reset skipped', scanOperationIdRef.current, {
+          reason: 'error reset timer fired outside error phase',
+          phase: scanPhaseRef.current,
+        });
+        return;
+      }
       resetToWelcome();
     }, delay);
   }
@@ -546,10 +568,15 @@ export default function Page() {
       traceScanEvent('scan error handling blocked', activeScan.id, { reason: 'inactive_scan' });
       return;
     }
+    if (activeScan?.requestStarted && !activeScan.requestCompleted) {
+      traceScanEvent('scan error reset deferred', activeScan.id, { reason: 'prediction request still in flight' });
+      return;
+    }
 
     transitionScanPhase(SCAN_PHASES.ERROR);
     setStatus('วิเคราะห์ไม่สำเร็จ');
     setSubStatus(message);
+    setCountdown(Math.ceil(resetDelay / 1000));
     scheduleAutoReset(resetDelay);
   }
 
@@ -772,6 +799,7 @@ export default function Page() {
   // starts only after the request reaches a terminal result or error.
   useEffect(() => {
     if (ttState === TT_STATES.IDLE) return undefined;
+    if (ttState === TT_STATES.SCAN && scanPhase === SCAN_PHASES.ERROR) return undefined;
 
     const isActiveScanPhase = ttState === TT_STATES.SCAN &&
       (scanPhase === SCAN_PHASES.CAPTURING || scanPhase === SCAN_PHASES.ANALYZING);
@@ -882,7 +910,7 @@ export default function Page() {
       const normalizedResult = normalizeClassificationResponse(detectionResult);
       if (normalizedResult?.status === 'no_waste_detected' || normalizedResult?.no_waste_detected) {
         showScanError(
-          normalizedResult.retry_message || 'ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่',
+          normalizedResult.retry_message || 'ไม่พบวัตถุสำหรับคัดแยกในภาพ',
           activeScan,
         );
         return;
@@ -1063,8 +1091,8 @@ export default function Page() {
       }
 
       transitionScanPhase(SCAN_PHASES.ANALYZING);
-      setStatus('วางขยะลงได้เลย');
-      setSubStatus('กำลังวิเคราะห์...');
+      setStatus('กำลังวิเคราะห์ อาจใช้เวลาสักครู่');
+      setSubStatus('');
 
       if (USE_MOCK_CLASSIFICATION) {
         updateScanDebugReason('capture blocked: mock classification enabled; no network request');
@@ -1159,15 +1187,11 @@ export default function Page() {
         traceScanEvent('capture early return', activeScan.id, { reason: 'inactive_scan_after_prediction_request' });
         return;
       }
-      if (process.env.NODE_ENV !== 'production') console.debug('[CLASSIFY RAW]', parsed);
+      const predictionFailure = getPredictionFailure(res, parsed);
+      if (predictionFailure) throw predictionFailure;
 
-      if (!res.ok || parsed?.status === 'api_error') {
-        const apiError = new Error(parsed?.detail || parsed?.error || `Prediction failed (${res.status})`);
-        apiError.responseStatus = parsed?.status || 'api_error';
-        throw apiError;
-      }
-
-      // --- Normalize model response (robust against partial / variant schemas) ---
+      // The backend validates the complete model JSON and exactly three top
+      // candidates before returning any mappable prediction.
       let normalized = parsed;
       try {
         // unwrap common wrappers
@@ -1200,17 +1224,24 @@ export default function Page() {
         ? `request failed: ${e?.name || 'Error'}`
         : `capture blocked: ${e?.scanMessage || e?.message || e?.name || 'unknown capture error'}`);
 
+      const requestErrorResetDelay = activeScan.requestStarted
+        ? PREDICTION_ERROR_RESET_MS
+        : ERROR_RESET_DELAY_MS;
       if (e.name === 'TimeoutError') {
         console.warn('[SCAN] Detection timed out.');
-        showScanError('การวิเคราะห์ใช้เวลานานเกินไป', activeScan, TIMEOUT_RESET_DELAY_MS);
+        showScanError('ระบบวิเคราะห์ใช้เวลานานเกินไป', activeScan, requestErrorResetDelay);
       } else if (e.name === 'AbortError') {
-        showScanError('การวิเคราะห์ถูกยกเลิก กรุณาลองใหม่อีกครั้ง', activeScan);
+        showScanError('การวิเคราะห์หยุดก่อนเสร็จ', activeScan, requestErrorResetDelay);
       } else if (e.responseStatus === 'api_error') {
         console.error('backend API error', e);
-        showScanError('ระบบวิเคราะห์ขัดข้อง กรุณาลองใหม่อีกครั้ง', activeScan);
+        showScanError('ระบบวิเคราะห์ขัดข้อง', activeScan, requestErrorResetDelay);
       } else {
         console.error('scan error', e);
-        showScanError(e.scanMessage || 'ไม่สามารถเชื่อมต่อระบบวิเคราะห์ได้', activeScan);
+        showScanError(
+          activeScan.requestStarted ? 'เชื่อมต่อระบบวิเคราะห์ไม่ได้' : (e.scanMessage || 'ไม่สามารถอ่านภาพจากกล้องได้'),
+          activeScan,
+          requestErrorResetDelay,
+        );
       }
     } finally {
       activeScan.requestCompleted = true;
@@ -1647,9 +1678,11 @@ export default function Page() {
             </div>
 
             {/* Countdown below camera — only capsule, clean */}
-            <div className="tt-countdown">
-              กลับหน้าหลักใน <strong>{countdown}</strong> วินาที
-            </div>
+            {scanPhase !== SCAN_PHASES.ANALYZING && (
+              <div className="tt-countdown">
+                กลับหน้าหลักใน <strong>{countdown}</strong> วินาที
+              </div>
+            )}
           </div>
         </div>
 

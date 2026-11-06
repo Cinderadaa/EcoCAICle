@@ -2,15 +2,38 @@
   "schema_version": "1.0",
   "location_id": "ICT-001",
   "location_name": "ICT Kiosk",
-  "mapping_version": "ICT-10-bin-v4",
+  "mapping_version": "ICT-10-bin-v5",
   "enabled": true,
-  "classification_policy": {
-    "confidence_threshold": 0.7,
-    "infectious_low_confidence_override": {
+  "object_name_overrides": [
+    {
+      "id": "mobile_phone",
       "enabled": true,
-      "waste_category": "infectious",
-      "confidence_threshold": 0.5,
-      "object_name_th_allowlist": [
+      "match_type": "contains",
+      "object_name_th_aliases": ["โทรศัพท์มือถือ", "มือถือ"],
+      "waste_category": "ewaste",
+      "material_subtype": "e_waste",
+      "bin_id": "ICT-001-B07",
+      "minimum_confidence": 0.0,
+      "bypass_confidence_threshold": true,
+      "mapping_reason": "local_object_name_override_mobile_phone"
+    },
+    {
+      "id": "computer_mouse",
+      "enabled": true,
+      "match_type": "contains",
+      "object_name_th_aliases": ["เมาส์คอมพิวเตอร์", "เมาส์"],
+      "waste_category": "ewaste",
+      "material_subtype": "e_waste",
+      "bin_id": "ICT-001-B07",
+      "minimum_confidence": 0.5,
+      "bypass_confidence_threshold": false,
+      "mapping_reason": "local_object_name_override_computer_mouse"
+    },
+    {
+      "id": "infectious_waste",
+      "enabled": true,
+      "match_type": "contains",
+      "object_name_th_aliases": [
         "หน้ากากอนามัยใช้แล้ว",
         "หน้ากากทางการแพทย์ใช้แล้ว",
         "หน้ากากใช้แล้ว",
@@ -29,8 +52,16 @@
         "วัสดุการแพทย์ปนเปื้อน",
         "วัสดุทางการแพทย์ปนเปื้อน"
       ],
-      "mapping_reason": "local_infectious_alias_override"
-    },
+      "waste_category": "infectious",
+      "material_subtype": "infectious",
+      "bin_id": "ICT-001-B10",
+      "minimum_confidence": 0.5,
+      "bypass_confidence_threshold": false,
+      "mapping_reason": "local_object_name_override_infectious"
+    }
+  ],
+  "classification_policy": {
+    "confidence_threshold": 0.7,
     "unknown_fallback": {
       "enabled": true,
       "applies_to": [
@@ -126,7 +157,20 @@
     "infectious": "ICT-001-B10"
   },
   "mapping_rulebook": {
-    "version": "ICT-physical-bin-rules-v2",
+    "version": "ICT-physical-bin-rules-v3",
+    "confidence_overrides": [
+      {
+        "id": "pet_bottle_local_confidence_threshold",
+        "waste_category": "pet_bottle",
+        "material_subtype": "pet_bottle",
+        "visible_condition": "clean_dry",
+        "has_food_scraps": false,
+        "has_liquid": false,
+        "minimum_confidence": 0.6,
+        "bin_id": "ICT-001-B02",
+        "mapping_reason": "pet_bottle_local_confidence_threshold"
+      }
+    ],
     "ordered_rules": [
       {
         "id": "infectious",
@@ -190,6 +234,10 @@
           "rigid_plastic": "clean_dry_rigid_plastic_rdf",
           "plastic_straw": "clean_dry_plastic_straw_rdf",
           "plastic_spoon": "clean_dry_plastic_spoon_rdf"
+        },
+        "minimum_confidence_by_material_subtype": {
+          "rigid_plastic": 0.6,
+          "plastic_straw": 0.6
         },
         "eligible_object_names_th": [],
         "bin_id": "ICT-001-B08",

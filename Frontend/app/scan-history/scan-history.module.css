@@ -40,6 +40,7 @@
 .meta span:first-child { overflow-wrap: anywhere; }
 .details { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; font-size: 12px; color: #627087; }
 .details b { color: #25324a; }
+.classificationMessage { margin: 6px 0 0; color: #72521b; font-size: 12px; font-weight: 700; }
 .candidates { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 7px 0 0; padding: 0; list-style-position: inside; color: #7b879a; font-size: 11px; }
 .candidates li { display: flex; gap: 5px; align-items: center; }.candidates b { color: #637087; font-weight: 600; }.candidates li > span:last-child { color: #364862; font-weight: 700; }
 .muted { color: #8994a6; }
@@ -55,5 +56,18 @@
 .largeImage { display: block; width: 100%; max-height: 54vh; object-fit: contain; border-radius: 9px; background: #eff2f7; }
 .noImage { display: grid; place-items: center; height: 180px; border-radius: 9px; background: #eff2f7; color: #718097; }
 .modal > .chips { margin-top: 12px; }.request { color: #718097; font: 12px monospace; overflow-wrap: anywhere; }.modal h3 { margin: 16px 0 7px; font-size: 14px; }
+.detailGrid { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: 5px 12px; margin: 10px 0; font-size: 12px; }.detailGrid dt { color: #718097; }.detailGrid dd { margin: 0; color: #25324a; overflow-wrap: anywhere; }
+.pocPanel { max-width: 1400px; margin: 0 auto 14px; padding: 14px; border: 1px solid #d9c98f; border-radius: 12px; background: #fffbea; color: #4a3d12; }
+.pocNotice { margin: 0 0 10px; font-size: 13px; line-height: 1.5; }
+.pocMetrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 0; }
+.pocMetrics > div { padding: 10px; border-radius: 9px; background: white; }
+.pocMetrics dt { font-size: 11px; font-weight: 800; color: #6b5a1f; }
+.pocMetrics dd { margin: 3px 0 2px; font-size: 20px; font-weight: 800; color: #25324a; }
+.pocMetrics small { color: #7a6c3a; font-size: 11px; }
+.pocPanel .muted { margin: 10px 0 0; font-size: 12px; color: #7a6c3a; }
+.pocDetails { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-top: 8px; font-size: 12px; color: #627087; }
+.pocDetails b { color: #25324a; }
+.demoBadge { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 800; background: #fde7c2; color: #7a4a00; }
+.verifiedBadge { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 800; background: #d8f3e2; color: #185c34; }
 .record { margin: 0; padding: 14px; overflow: auto; border-radius: 8px; background: #101827; color: #dce7fa; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) { .page { padding-inline: 12px; }.header { align-items: start; }.header h1 { font-size: 24px; }.row { grid-template-columns: 82px minmax(0,1fr); gap: 10px; padding: 9px; }.thumb { height: 76px; }.rowTop > strong { font-size: 14px; }.meta { display: grid; gap: 2px; }.details { gap: 4px 10px; }.filters select { min-width: 135px; }.candidates { display: grid; }.modal { padding: 14px; } }

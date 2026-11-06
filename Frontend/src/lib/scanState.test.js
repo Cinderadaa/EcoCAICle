@@ -47,6 +47,15 @@ test('API timeout/error returns to scanning after error state', () => {
   assert.deepEqual(simulateCycle(SCAN_PHASES.ERROR), expectedLifecycle(SCAN_PHASES.ERROR));
 });
 
+test('502 and empty prediction responses leave analyzing and return to the scan flow', () => {
+  for (const failure of ['http_502', 'http_504', 'empty_content']) {
+    const phase = SCAN_PHASES.ANALYZING;
+    const terminalPhase = SCAN_PHASES.ERROR;
+    assert.equal(isValidScanPhaseTransition(phase, terminalPhase), true, failure);
+    assert.deepEqual(simulateCycle(terminalPhase), expectedLifecycle(terminalPhase), failure);
+  }
+});
+
 test('capture and analysis cannot transition backwards into another request', () => {
   assert.equal(
     isValidScanPhaseTransition(SCAN_PHASES.CAPTURING, SCAN_PHASES.CAPTURING),

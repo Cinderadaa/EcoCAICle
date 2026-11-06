@@ -26,6 +26,8 @@ from fastapi.responses import JSONResponse, Response
 try:  # Supports both Docker's working directory and package-style imports.
     from .mapping_config import (
         MappingConfigError,
+        SUPPORTED_MATERIAL_SUBTYPES,
+        configured_object_name_override,
         load_location_config,
         normalize_material_subtype,
         normalize_object_name_th,
@@ -33,6 +35,7 @@ try:  # Supports both Docker's working directory and package-style imports.
         normalize_waste_category,
     )
     from .mapping_service import LocationMismatchError, MappingService
+    from .model_request import build_model_request_payload
     from .inference_storage import (
         DEFAULT_STORAGE_ROOT,
         ImageValidationError,
@@ -48,9 +51,13 @@ try:  # Supports both Docker's working directory and package-style imports.
         ReviewServiceError,
     )
     from .scan_history import ScanHistoryService, ScanNotFoundError, ScanHistoryUnavailableError
+    from .historical_poc import GROUND_TRUTH_SOURCES, build_poc_dataset, public_row
+    from .inference_storage import REQUEST_ID_PATTERN
 except ImportError:  # pragma: no cover - exercised when running app.py directly
     from mapping_config import (
         MappingConfigError,
+        SUPPORTED_MATERIAL_SUBTYPES,
+        configured_object_name_override,
         load_location_config,
         normalize_material_subtype,
         normalize_object_name_th,
@@ -58,6 +65,7 @@ except ImportError:  # pragma: no cover - exercised when running app.py directly
         normalize_waste_category,
     )
     from mapping_service import LocationMismatchError, MappingService
+    from model_request import build_model_request_payload
     from inference_storage import (
         DEFAULT_STORAGE_ROOT,
         ImageValidationError,
@@ -73,6 +81,8 @@ except ImportError:  # pragma: no cover - exercised when running app.py directly
         ReviewServiceError,
     )
     from scan_history import ScanHistoryService, ScanNotFoundError, ScanHistoryUnavailableError
+    from historical_poc import GROUND_TRUTH_SOURCES, build_poc_dataset, public_row
+    from inference_storage import REQUEST_ID_PATTERN
 
 try:
     from dotenv import load_dotenv
@@ -84,15 +94,35 @@ if load_dotenv is not None:
 
 
 API_URL = os.environ.get("QWEN_API_URL", "https://genai-local.boonrawd.co.th/litellm/v1")
-MODEL = os.environ.get("QWEN_MODEL", "qwen3-vl:4b")
-QWEN_REQUEST_TIMEOUT_SECONDS = 40
+QWEN_PROVIDER = os.environ.get("QWEN_PROVIDER", "litellm").strip().lower()
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+
+
+def _model_from_environment(value: object = None) -> str:
+    configured = os.environ.get("QWEN_MODEL", "qwen3-vl:4b") if value is None else value
+    return str(configured).strip() or "qwen3-vl:4b"
+
+
+MODEL = _model_from_environment()
+
+
+def _timeout_seconds_from_environment(value: object = None) -> int:
+    configured = os.environ.get("QWEN_TIMEOUT_SECONDS", "60") if value is None else value
+    try:
+        return max(1, int(configured))
+    except (TypeError, ValueError):
+        return 60
+
+
+QWEN_REQUEST_TIMEOUT_SECONDS = _timeout_seconds_from_environment()
 GLASS_PET_REVIEW_CONFIDENCE_GAP = 0.15
-PROMPT_VERSION = os.environ.get("ECOCAICLE_PROMPT_VERSION") or "qwen-waste-classification-v7"
+PROMPT_VERSION = os.environ.get("ECOCAICLE_PROMPT_VERSION") or "qwen-waste-classification-v11"
 REVIEWER_TOKEN = os.environ.get("ECOCAICLE_REVIEWER_TOKEN")
 API_KEY = os.environ.get("QWEN_API_KEY")
 CA_BUNDLE = os.environ.get("QWEN_CA_BUNDLE")
 SSL_CONTEXT = ssl.create_default_context(cafile=CA_BUNDLE) if CA_BUNDLE else ssl.create_default_context()
 LOGGER = logging.getLogger(__name__)
+FALLBACK_METRICS = {"low_confidence": 0, "response_invalid": 0}
 
 
 def _trace_scan_event(event: str, cycle_id: str, **details: object) -> None:
@@ -137,41 +167,15 @@ DEFAULT_ITEM_NAMES = {
     "infectious": "ขยะติดเชื้อ",
     "unknown": "ไม่สามารถระบุได้",
 }
-PROMPT = """Identify and classify a waste item only when a clearly visible physical waste object is present in the image. Return classification data only. Never return a bin number, bin name, bin ID, destination, disposal instruction, or mapping decision; the backend handles mapping and any preparation guidance.
+PROMPT = """Classify the main foreground item from visible evidence only; ignore hands, people, background, labels/caps as the main material, and minor accessories. Do not infer unseen details or any bin/disposal decision.
 
-First decide whether an identifiable physical waste object is actually visible. Do not infer or invent a waste item from a person, face, hand, clothing, desk, keyboard, background, shadows, reflections, or motion. If no identifiable waste object is visible, return exactly the no-waste classification: object_name_th "ไม่พบขยะในภาพ", waste_category "unknown", material_subtype "unknown", low confidence (0.0–0.2), and exactly three top_candidates whose names/categories/subtypes are consistent with no waste and unknown. Candidate 1 must match the primary fields. Set resin_identification_code and visible_condition to "unknown", and has_food_scraps and has_liquid to false.
+Set visible_object_detected to false only for a genuinely absent-object frame (empty, hand-only, or unusably occluded): classification_reason="no_object_visible", Thai object_name_th="ไม่พบวัตถุสำหรับคัดแยกในภาพ", category/subtype="unknown", confidence 0.0–0.2, unknown resin/condition, and 3 consistent unknown candidates. If an object is visible but unsupported or uncertain, set visible_object_detected=true and classification_reason "visible_object_unclassified"; name it briefly in Thai and use unknown category/subtype when evidence is insufficient.
 
-For any waste classification, require visible material and shape evidence before returning PET, glass, metal, paper, or plastic. Object shape alone, a person's belongings, or contextual assumptions are not evidence of waste material.
+Use waste_category from general, pet_bottle, plastic, paper, glass, metal, ewaste, fuel, hazardous, infectious, unknown. Use material_subtype from pet_bottle, stretch_plastic, rigid_plastic, plastic_straw, plastic_spoon, multilayer_packaging, snack_sachet, coffee_sachet, refill_pouch, non_recyclable_foam, plastic_coated_paper, non_recyclable_dry_plastic, paper, cardboard, glass, metal, e_waste, hazardous, infectious, general, unknown. Set visible_condition to clean_dry only when visibly clean and dry, food_or_liquid_contaminated only for visible residue/liquid, otherwise unknown. Set has_food_scraps/has_liquid true only when visible. Resin code is "1"–"7" only when legible; otherwise "unknown".
 
-Identify the main item itself. Ignore hands, people, background, caps, labels, and minor accessories when identifying its primary material. A cap or label may be read only as evidence about the body when it visibly carries a resin/material mark; it does not define the body's material. Describe the item briefly in Thai, using only visible evidence; do not invent a brand, contents, or material.
+PET requires visible evidence of an ordinary thin-walled disposable molded beverage bottle; resin marks are not required. Do not call a glass bottle, metal bottle, tumbler, or reusable/insulated container PET based on shape. Glass needs visible glass-body evidence; metal needs visible metal-body evidence. Never infer PETE/resin code from shape, color, opacity, or transparency. Keep stretch_plastic for visibly flexible bags/film only; rigid plastic is not PET. For a clearly identifiable smartphone, name it exactly "โทรศัพท์มือถือ", set waste_category to "ewaste", and set material_subtype to "e_waste". A front-facing smartphone with its screen visible is phone-specific evidence. A rear-facing smartphone in a black case remains a smartphone when its camera module or overall phone form is identifiable. A generic black rectangle or plastic container with no phone-specific feature is not enough; keep category/subtype "unknown". Do not infer ewaste from rectangular shape, black color.
 
-Choose waste_category from: general, pet_bottle, plastic, paper, glass, metal, ewaste, fuel, hazardous, infectious, unknown.
-Choose material_subtype from: pet_bottle, stretch_plastic, rigid_plastic, plastic_straw, plastic_spoon, multilayer_packaging, snack_sachet, coffee_sachet, refill_pouch, non_recyclable_foam, plastic_coated_paper, non_recyclable_dry_plastic, paper, cardboard, glass, metal, e_waste, hazardous, infectious, general, unknown.
-
-Visual decision rules:
-- For Bin 2 eligibility, identify a beverage bottle and visibly supported PET body material. A legible resin code 1 or PET/PETE mark on the bottle body is strong evidence; visible bottle/body evidence may support PET only when the material is visibly plastic. Bottle shape or transparency alone is not enough. Do not return a PET classification when the bottle material is uncertain.
-- Never infer resin_identification_code from bottle shape, color, transparency, or other appearance. Return code "1" through "7" only when that exact code is legible; otherwise return the string "unknown". PET/PETE text indicates code "1" only when it is visibly present.
-- Never emit material_subtype rigid_plastic for an item classified as pet_bottle. Use rigid_plastic only for supported non-PET rigid plastic items.
-- For ICT-001, category and subtype are separate fields: use waste_category "plastic" for plastic items and identify the specific material in material_subtype. The PET beverage-bottle label remains waste_category/material_subtype "pet_bottle" under its dedicated Bin 2 route.
-- Set material_subtype "stretch_plastic" only for visibly flexible plastic film or bags: carrier bags, soup/ice bags, produce bags, cling film, shrink/stretch film around packs, bubble wrap, or zip-lock bags. The item must visibly flex or have film/bag structure; do not infer flexibility from packaging context. Never use stretch_plastic for rigid containers, bottles, cups, spoons, straws, jars, or hard packaging.
-- ICT-001 local routing: clean, dry PET beverage bottles use subtype pet_bottle for Bin 2; clean, dry stretch_plastic bags/film use subtype stretch_plastic for Bin 3; clean, dry plastic/packaging not accepted by either uses its supported subtype for RDF Bin 8. Clean, dry non-PET rigid plastic uses waste_category plastic and subtype rigid_plastic for Bin 8. Keep pet_bottle and stretch_plastic out of RDF. Clean, dry disposable plastic straws and disposable plastic cutlery/spoons remain approved RDF subtypes. Do not infer bin names or numbers in the JSON.
-- Food/liquid-contaminated plastic, plastic that cannot be cleaned, and plastic with unknown cleanliness do not qualify for Bin 2, Bin 3, or RDF; use visible_condition accordingly so ICT-001 routes it to general/landfill Bin 1.
-- A glass classification requires visible evidence of glass in the primary item's body, such as characteristic refraction, thick rigid glass walls or lip, or a substantial glass base. Do not classify an opaque plastic bottle as glass without such evidence. Bottle shape, reflections, contents, and a cap alone do not prove glass.
-- Distinguish paper from cardboard by form: flat sheets or thin paper are paper; formed boxes and corrugated board are waste_category paper with material_subtype cardboard. Do not call cardboard a different waste_category.
-- A clearly identifiable thin, hollow disposable drinking straw with visibly plastic material is waste_category plastic and material_subtype plastic_straw. A straw may be white or colored; use the visible hollow drinking-straw form and plastic evidence, not color alone.
-- Do not confuse a drinking straw with a cable/wire, pen, product tube, or a line/object in the background. If it is not possible to identify the item as a disposable drinking straw, or its plastic material is not visible, use waste_category unknown and material_subtype unknown rather than plastic_straw.
-- Classify plastic_straw as plastic only when the visible object is identifiable as a disposable drinking straw and the body is visibly plastic. Set visible_condition to clean_dry only when the straw is visibly clean and dry. Contamination does not qualify it for the clean/dry RDF route.
-- A clearly visible disposable spoon with a visibly plastic body is waste_category plastic and material_subtype plastic_spoon. Do not use plastic_spoon for a metal/reusable spoon, fork, spatula, or an unclear utensil; when disposable-spoon identity or plastic material is uncertain, use unknown. Ignore food scraps on the spoon when identifying its body material, but set food_or_liquid_contaminated when visible residue/liquid is present so it cannot use the clean/dry RDF route.
-- Distinguish metal from plastic-coated material by the primary item's visible structure and surface. Metal requires visible metal evidence such as a formed metal body, metallic edge/seam, or exposed metal surface; a shiny coating, foil-like print, or plastic laminate alone is not metal. Use plastic_coated_paper only when both paper and its plastic coating are visible; otherwise use unknown when evidence is insufficient.
-- If the item can be named but its material cannot be supported visually, retain the best concise Thai object name and use waste_category unknown, material_subtype unknown, and low confidence. Do not guess a material from item shape alone.
-- Ignore minor accessories and classify the main item's body. For plastic, distinguish stretch film, rigid plastic, and multilayer packaging only when visible evidence supports the distinction.
-- Cardboard uses waste_category paper/material_subtype cardboard; metal cans use metal/metal; electronic devices use ewaste/e_waste. A clearly identified disposable medical face mask (หน้ากากอนามัย), including used, is infectious.
-- Set visible_condition to clean_dry only when visibly clean and dry; food_or_liquid_contaminated only when visible residue/liquid contaminates the item; otherwise unknown. Set has_food_scraps and has_liquid true only when clearly visible.
-- confidence is a number from 0.0 to 1.0 for the combined object and material classification. Keep it low when evidence is unclear. top_candidates must contain exactly 3 ranked plausible classifications, most likely first. Every candidate must include object_name_th, waste_category, material_subtype, and confidence (0.0 to 1.0). Candidate 1 must exactly match the primary object_name_th, waste_category, material_subtype, and confidence. Candidates 2 and 3 must be plausible alternatives supported by visible evidence, ranked in non-increasing confidence order after candidate 1. Always give alternatives, even when highly certain; a generic material alternative and/or unknown is allowed. Never invent visual evidence to fill an alternative. Include close alternatives such as glass and pet_bottle only when visible evidence supports both.
-
-Return one valid JSON object only, with all required fields shown below and no markdown or extra text. resin_identification_code must be one of the strings "1" through "7" or "unknown". Do not include any bin or disposal field.
-{"object_name_th":"ขวดเครื่องดื่มแก้ว","waste_category":"glass","material_subtype":"glass","resin_identification_code":"unknown","visible_condition":"clean_dry","confidence":0.8,"top_candidates":[{"object_name_th":"ขวดเครื่องดื่มแก้ว","waste_category":"glass","material_subtype":"glass","confidence":0.8},{"object_name_th":"ขวดเครื่องดื่ม","waste_category":"unknown","material_subtype":"unknown","confidence":0.5},{"object_name_th":"ภาชนะ","waste_category":"unknown","material_subtype":"unknown","confidence":0.2}],"has_food_scraps":false,"has_liquid":false}
-"""
+Return compact JSON only: one complete JSON object on one line, with no prose, markdown, explanations, analysis, or reasoning in content. Required top-level keys: object_name_th, waste_category, material_subtype, visible_object_detected (boolean), classification_reason, resin_identification_code, visible_condition, confidence (number 0–1), top_candidates, has_food_scraps (boolean), has_liquid (boolean). top_candidates must contain exactly 3 complete valid objects, each with non-empty string object_name_th, valid waste_category, valid material_subtype, and numeric confidence 0–1. Candidate 1 must match the primary classification; rank all 3 in non-increasing confidence order. Do not omit, truncate, or add text around the JSON."""
 
 
 class ModelResponseError(ValueError):
@@ -196,6 +200,15 @@ def _is_beverage_bottle_name(value: object) -> bool:
     ))
 
 
+def _is_non_pet_bottle_name(value: object) -> bool:
+    name = normalize_object_name_th(value)
+    return any(token in name for token in (
+        "ขวดแก้ว", "ขวดโลหะ", "ขวดสแตนเลส", "กระบอกน้ำ", "แก้ว",
+        "แก้วเก็บอุณหภูมิ", "แก้วน้ำ", "glass bottle", "metal bottle",
+        "stainless bottle", "reusable bottle", "insulated bottle", "tumbler", "thermos",
+    ))
+
+
 def _chat_completions_url(api_url: str = API_URL) -> str:
     """Accept either the LiteLLM v1 base URL or its full chat-completions URL."""
     parts = urlsplit(api_url)
@@ -203,6 +216,10 @@ def _chat_completions_url(api_url: str = API_URL) -> str:
     if not path.endswith("/chat/completions"):
         path = f"{path}/chat/completions"
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+def _ollama_chat_url(base_url: str = OLLAMA_BASE_URL) -> str:
+    return f"{base_url.rstrip('/')}/api/chat"
 
 
 app = FastAPI(title="EcoCAICle API")
@@ -353,8 +370,7 @@ def _one_line(value: object) -> str:
 
 def _safe_model_item_name(value: object, waste_type: str) -> str:
     item_name = " ".join(value.split())[:120] if isinstance(value, str) else ""
-    override = MAPPING_CONFIG.infectious_low_confidence_override if MAPPING_CONFIG else {}
-    if normalize_object_name_th(item_name) in override.get("object_name_th_allowlist", ()):
+    if _configured_object_name_override(item_name):
         return item_name
     if not item_name or not all(
         char.isspace() or "\u0e01" <= char <= "\u0e3a" or "\u0e40" <= char <= "\u0e4e"
@@ -374,21 +390,13 @@ def _candidate_confidence(value: object) -> Optional[float]:
 
 def _normalize_configured_model_category(category: object, object_name_th: object) -> str:
     normalized_category = normalize_waste_category(category)
-    override = MAPPING_CONFIG.infectious_low_confidence_override if MAPPING_CONFIG else {}
-    if (
-        override.get("enabled") is True
-        and normalize_object_name_th(object_name_th) in override.get("object_name_th_allowlist", ())
-    ):
-        return "infectious"
-    return normalized_category
+    override = _configured_object_name_override(object_name_th)
+    return str(override["waste_category"]) if override else normalized_category
 
 
-def _is_configured_infectious_name(object_name_th: object) -> bool:
-    override = MAPPING_CONFIG.infectious_low_confidence_override if MAPPING_CONFIG else {}
-    return (
-        override.get("enabled") is True
-        and normalize_object_name_th(object_name_th) in override.get("object_name_th_allowlist", ())
-    )
+def _configured_object_name_override(object_name_th: object) -> Optional[object]:
+    overrides = MAPPING_CONFIG.object_name_overrides if MAPPING_CONFIG else ()
+    return configured_object_name_override(object_name_th, overrides)
 
 
 def _normalize_top_candidates(
@@ -401,27 +409,38 @@ def _normalize_top_candidates(
 ) -> list[dict[str, object]]:
     candidates: list[dict[str, object]] = []
     provided_count = len(raw_candidates) if isinstance(raw_candidates, list) else 0
+    indexed_candidates: list[tuple[int, dict[str, object]]] = []
     if isinstance(raw_candidates, list):
-        for candidate in raw_candidates[:3]:
+        for index, candidate in enumerate(raw_candidates[:3], start=1):
             if not isinstance(candidate, dict):
+                LOGGER.warning(
+                    "top_candidates_candidate_dropped candidate_index=%d reason=not_object field=top_candidates",
+                    index,
+                )
                 continue
             raw_name = candidate.get("object_name_th") or candidate.get("itemNameTh")
             raw_category = candidate.get("waste_category")
             category = _normalize_configured_model_category(raw_category, raw_name)
             subtype = normalize_material_subtype(candidate.get("material_subtype"))
+            if override := _configured_object_name_override(raw_name):
+                subtype = str(override["material_subtype"])
             if category == "pet_bottle" and subtype == "rigid_plastic":
                 category = "plastic"
-            if category == "infectious" and _is_configured_infectious_name(raw_name):
-                subtype = "infectious"
             score = _candidate_confidence(candidate.get("confidence"))
             if score is None:
+                LOGGER.warning(
+                    "top_candidates_candidate_dropped candidate_index=%d reason=invalid_value field=confidence",
+                    index,
+                )
                 continue
-            candidates.append({
+            normalized = {
                 "object_name_th": _safe_model_item_name(raw_name, category),
                 "waste_category": category,
                 "material_subtype": subtype,
                 "confidence": score,
-            })
+            }
+            candidates.append(normalized)
+            indexed_candidates.append((index, normalized))
     primary = {
         "object_name_th": primary_name,
         "waste_category": primary_category,
@@ -447,11 +466,16 @@ def _normalize_top_candidates(
     # Candidate 1 is fixed to the primary prediction. Keep only alternatives
     # that can follow it in non-increasing confidence order; do not fabricate
     # alternatives when the model omits them or supplies invalid scores.
-    alternatives = sorted(candidates[1:], key=lambda item: float(item["confidence"]), reverse=True)
+    alternatives = sorted(indexed_candidates[1:], key=lambda entry: float(entry[1]["confidence"]), reverse=True)
     ordered = [primary.copy()]
-    for alternative in alternatives:
+    for candidate_index, alternative in alternatives:
         if float(alternative["confidence"]) <= float(primary_confidence):
             ordered.append(alternative)
+        else:
+            LOGGER.warning(
+                "top_candidates_candidate_dropped candidate_index=%d reason=confidence_exceeds_primary field=confidence",
+                candidate_index,
+            )
     ordered = ordered[:3]
     if len(ordered) != 3:
         LOGGER.warning(
@@ -526,10 +550,27 @@ def _parse_model_response(
     waste_type = _normalize_configured_model_category(raw_category, raw_item_name)
     item_name = _safe_model_item_name(raw_item_name, waste_type)
     material_subtype = normalize_material_subtype(response.get("material_subtype"))
+    if override := _configured_object_name_override(raw_item_name):
+        material_subtype = str(override["material_subtype"])
     resin_identification_code = _normalize_resin_identification_code(
         response.get("resin_identification_code")
     )
-    if resin_identification_code == "1" and _is_beverage_bottle_name(raw_item_name):
+    non_pet_name = _is_non_pet_bottle_name(raw_item_name)
+    if waste_type == "pet_bottle" and (
+        material_subtype in {"glass", "metal"} or non_pet_name
+    ):
+        if material_subtype in {"glass", "metal"}:
+            waste_type = material_subtype
+        else:
+            waste_type = "unknown"
+            material_subtype = "unknown"
+    elif (
+        resin_identification_code == "1"
+        and _is_beverage_bottle_name(raw_item_name)
+        and not non_pet_name
+        and waste_type not in {"glass", "metal"}
+        and material_subtype not in {"glass", "metal"}
+    ):
         waste_type = "pet_bottle"
         material_subtype = "pet_bottle"
     elif waste_type == "pet_bottle" and material_subtype == "rigid_plastic":
@@ -539,6 +580,16 @@ def _parse_model_response(
     if waste_type == "infectious" and _is_configured_infectious_name(item_name):
         material_subtype = "infectious"
     visible_condition = normalize_visible_condition(response.get("visible_condition"))
+    if (
+        response.get("visible_object_detected") is not False
+        and normalize_object_name_th(item_name) in {
+            normalize_object_name_th(NO_WASTE_OBJECT_NAME_TH),
+            normalize_object_name_th(LEGACY_NO_WASTE_OBJECT_NAME_TH),
+        }
+    ):
+        # A legacy no-waste sentinel without an explicit visibility signal is
+        # not enough evidence to reject a frame as empty.
+        item_name = VISIBLE_UNCLASSIFIED_OBJECT_NAME_TH
 
     confidence = response.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
@@ -556,7 +607,51 @@ def _parse_model_response(
         primary_subtype=material_subtype,
         primary_confidence=confidence,
     )
-    if resin_identification_code == "1" and _is_beverage_bottle_name(raw_item_name):
+    # Unknown is a fallback label, not a stronger material hypothesis than a
+    # supported PET candidate for an explicitly named beverage bottle. Promote
+    # only that candidate, retain its own confidence, and leave ambiguous or
+    # explicitly glass/metal candidates untouched.
+    if (
+        waste_type == "unknown"
+        and material_subtype == "unknown"
+        and _is_beverage_bottle_name(item_name)
+        and not _is_non_pet_bottle_name(item_name)
+        and not any(candidate["waste_category"] in {"glass", "metal"} for candidate in top_candidates)
+    ):
+        pet_candidate = next((
+            candidate for candidate in top_candidates
+            if candidate["waste_category"] == "pet_bottle"
+            and candidate["material_subtype"] == "pet_bottle"
+        ), None)
+        if pet_candidate is not None:
+            waste_type = "pet_bottle"
+            material_subtype = "pet_bottle"
+            confidence = float(pet_candidate["confidence"])
+            promoted_primary = {
+                "object_name_th": item_name,
+                "waste_category": waste_type,
+                "material_subtype": material_subtype,
+                "confidence": confidence,
+            }
+            promoted_alternatives = []
+            for candidate_index, candidate in enumerate(top_candidates, start=1):
+                if candidate is pet_candidate:
+                    continue
+                if float(candidate["confidence"]) <= confidence:
+                    promoted_alternatives.append(candidate)
+                else:
+                    LOGGER.warning(
+                        "top_candidates_candidate_dropped candidate_index=%d reason=confidence_exceeds_promoted_primary field=confidence",
+                        candidate_index,
+                    )
+            top_candidates = [promoted_primary, *promoted_alternatives][:3]
+            if len(top_candidates) != 3:
+                LOGGER.warning(
+                    "top_candidates_incomplete diagnostic=top_candidates_incomplete provided_count=%d normalized_count=%d",
+                    len(response.get("top_candidates", ())) if isinstance(response.get("top_candidates"), list) else 0,
+                    len(top_candidates),
+                )
+    if resin_identification_code == "1" and _is_beverage_bottle_name(raw_item_name) and not non_pet_name:
         for candidate in top_candidates:
             candidate_name = normalize_object_name_th(candidate.get("object_name_th"))
             if candidate_name == normalize_object_name_th(item_name):
@@ -577,8 +672,20 @@ def _parse_model_response(
     )
 
 
-NO_WASTE_RETRY_MESSAGE_TH = "ไม่พบขยะในภาพ กรุณาวางขยะในกรอบแล้วสแกนใหม่"
-NO_WASTE_OBJECT_NAME_TH = "ไม่พบขยะในภาพ"
+def _parse_validated_model_response(raw: str) -> tuple[str, str, str, str, str, bool, bool, float, object, list[dict[str, object]]]:
+    parsed = _parse_model_response(raw)
+    normalized_count = len(parsed[-1])
+    if normalized_count != 3:
+        raise ModelResponseError(
+            f"Normalized top_candidates must contain exactly 3 items; got {normalized_count}"
+        )
+    return parsed
+
+
+NO_WASTE_RETRY_MESSAGE_TH = "ไม่พบวัตถุสำหรับคัดแยกในภาพ"
+NO_WASTE_OBJECT_NAME_TH = "ไม่พบวัตถุสำหรับคัดแยกในภาพ"
+VISIBLE_UNCLASSIFIED_OBJECT_NAME_TH = "วัตถุที่ยังระบุประเภทขยะไม่ได้"
+LEGACY_NO_WASTE_OBJECT_NAME_TH = "ไม่พบขยะในภาพ"
 
 
 def _is_no_waste_prediction(raw: object) -> bool:
@@ -597,15 +704,35 @@ def _is_no_waste_prediction(raw: object) -> bool:
         response.get("object_name_th") or response.get("objectNameTh") or
         response.get("item_name_th") or response.get("itemNameTh") or ""
     )
-    explicit = response.get("no_waste_detected") is True or response.get("valid_capture") is False
-    return explicit or (category == "unknown" and object_name == normalize_object_name_th(NO_WASTE_OBJECT_NAME_TH))
+    absent_object_names = {
+        normalize_object_name_th(NO_WASTE_OBJECT_NAME_TH),
+        normalize_object_name_th(LEGACY_NO_WASTE_OBJECT_NAME_TH),
+    }
+    # Legacy no-waste markers alone cannot distinguish an absent object from a
+    # visible but unsupported object. Require an explicit visibility decision.
+    if response.get("visible_object_detected") is not False:
+        return False
+    if object_name and object_name not in absent_object_names:
+        return False
+    candidates = response.get("top_candidates")
+    if isinstance(candidates, list):
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_name = normalize_object_name_th(candidate.get("object_name_th"))
+            candidate_category = str(candidate.get("waste_category", "unknown")).strip().lower()
+            if candidate_name and candidate_name not in absent_object_names:
+                return False
+            if candidate_category not in {"", "unknown"}:
+                return False
+    return category == "unknown"
 
 
 def _no_waste_response(*, request_id: str, stored_image: Optional[StoredImage],
                        timestamp: str, request_started_at: float,
                        inference_started_at: float, image_save_status: str,
                        storage_error_type: Optional[str]) -> dict[str, object]:
-    """Build an invalid-capture result that cannot carry or imply a bin."""
+    """Build a true absent-object result that cannot imply a bin."""
     top_candidates = [
         {"object_name_th": NO_WASTE_OBJECT_NAME_TH, "waste_category": "unknown",
          "material_subtype": "unknown", "confidence": score}
@@ -622,13 +749,16 @@ def _no_waste_response(*, request_id: str, stored_image: Optional[StoredImage],
         mapping_version=MAPPING_CONFIG.mapping_version if MAPPING_CONFIG else None,
         classification_status="invalid_capture", mapping_fallback=False,
         status="no_waste_detected", error_type=None, top_candidates=top_candidates,
-        mapping_reason="no_waste_detected",
+        visible_object_detected=False, classification_reason="no_object_visible",
+        mapping_reason="no_object_visible",
     )
     return {
         "request_id": request_id, "prompt_version": PROMPT_VERSION,
         "location_id": MAPPING_LOCATION_ID,
         "prediction": {"object_name_th": NO_WASTE_OBJECT_NAME_TH,
             "waste_category": "unknown", "material_subtype": "unknown",
+            "visible_object_detected": False,
+            "classification_reason": "no_object_visible",
             "resin_identification_code": "unknown", "visible_condition": "unknown",
             "confidence": 0.1, "top_candidates": top_candidates,
             "has_food_scraps": False, "has_liquid": False,
@@ -641,34 +771,58 @@ def _no_waste_response(*, request_id: str, stored_image: Optional[StoredImage],
         "mapping_reason": "no_waste_detected", "mapping_version": MAPPING_CONFIG.mapping_version if MAPPING_CONFIG else None,
         "classification_status": "invalid_capture", "status": "no_waste_detected",
         "no_waste_detected": True, "valid_prediction": False,
+        "classification_reason": "no_object_visible",
+        "visible_object_detected": False,
         "retry_message": NO_WASTE_RETRY_MESSAGE_TH,
         "preparation": _no_preparation("no_waste_detected"),
     }
 
 
-def _post_json(payload: dict) -> dict:
+def _post_json(payload: dict, provider: Optional[str] = None) -> dict:
+    selected_provider = (provider or QWEN_PROVIDER).strip().lower()
+    if selected_provider not in {"litellm", "ollama_native"}:
+        raise ModelResponseError(f"Unsupported QWEN_PROVIDER={selected_provider}")
+    request_payload = payload
+    endpoint = _chat_completions_url() if selected_provider == "litellm" else _ollama_chat_url()
     headers = {"Content-Type": "application/json"}
-    if API_KEY:
+    if selected_provider == "litellm" and API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
     request = urllib.request.Request(
-        _chat_completions_url(),
-        data=json.dumps(payload).encode("utf-8"),
+        endpoint,
+        data=json.dumps(request_payload).encode("utf-8"),
         headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(
         request,
-        timeout=QWEN_REQUEST_TIMEOUT_SECONDS,
+        timeout=60 if selected_provider == "ollama_native" else QWEN_REQUEST_TIMEOUT_SECONDS,
         context=SSL_CONTEXT,
     ) as response:
         result = json.loads(response.read().decode("utf-8"))
     if not isinstance(result, dict):
-        raise ModelResponseError("Expected a JSON object from LiteLLM")
+        raise ModelResponseError("Expected a JSON object from model provider")
     return result
 
 
+def _build_model_request_payload(
+    image_data_url: str,
+    provider: Optional[str] = None,
+) -> dict[str, object]:
+    return build_model_request_payload(
+        model=MODEL,
+        prompt=PROMPT,
+        image_data_url=image_data_url,
+        provider=provider or QWEN_PROVIDER,
+    )
+
+
 def _extract_chat_content(result: dict) -> str:
-    """Read OpenAI-compatible LiteLLM ``choices[0].message.content``."""
+    """Read final content from either LiteLLM or native Ollama chat."""
+    if isinstance(result.get("message"), dict):
+        content = result["message"].get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        raise ModelResponseError("Empty message.content")
     try:
         choices = result["choices"]
         first_choice = choices[0]
@@ -678,17 +832,143 @@ def _extract_chat_content(result: dict) -> str:
         raise ModelResponseError("Missing choices[0].message.content") from exc
 
     if isinstance(content, str):
-        return content
+        if content.strip():
+            return content
+        raise ModelResponseError("Empty choices[0].message.content")
     if isinstance(content, list):
         text_parts = [part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)]
         if text_parts:
-            return "\n".join(text_parts)
+            text = "\n".join(text_parts)
+            if text.strip():
+                return text
+            raise ModelResponseError("Empty choices[0].message.content")
     raise ModelResponseError("Expected text content in choices[0].message.content")
+
+
+def _validate_model_content(content: str) -> dict[str, object]:
+    """Require a complete JSON classification and exactly three candidates."""
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ModelResponseError("Model content is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ModelResponseError("Model content must be a JSON object")
+    required = {
+        "object_name_th", "waste_category", "material_subtype",
+        "visible_object_detected", "classification_reason",
+        "resin_identification_code", "visible_condition", "confidence",
+        "top_candidates", "has_food_scraps", "has_liquid",
+    }
+    missing = sorted(required - payload.keys())
+    if missing:
+        raise ModelResponseError(f"Model JSON is missing required fields: {','.join(missing)}")
+    candidates = payload.get("top_candidates")
+    if not isinstance(candidates, list) or len(candidates) != 3:
+        raise ModelResponseError("Model JSON must contain exactly 3 top_candidates")
+    candidate_fields = {"object_name_th", "waste_category", "material_subtype", "confidence"}
+    for index, candidate in enumerate(candidates):
+        if not isinstance(candidate, dict) or not candidate_fields.issubset(candidate):
+            raise ModelResponseError(f"Model top_candidate_{index + 1} is incomplete")
+        if not isinstance(candidate["object_name_th"], str) or not candidate["object_name_th"].strip():
+            raise ModelResponseError(f"Model top_candidate_{index + 1} invalid field=object_name_th")
+        if not isinstance(candidate["waste_category"], str) or candidate["waste_category"] not in WASTE_TYPES:
+            raise ModelResponseError(f"Model top_candidate_{index + 1} invalid field=waste_category")
+        if not isinstance(candidate["material_subtype"], str) or candidate["material_subtype"] not in SUPPORTED_MATERIAL_SUBTYPES:
+            raise ModelResponseError(f"Model top_candidate_{index + 1} invalid field=material_subtype")
+        candidate_confidence = candidate["confidence"]
+        if isinstance(candidate_confidence, bool) or not isinstance(candidate_confidence, (int, float)) or not 0 <= candidate_confidence <= 1:
+            raise ModelResponseError(f"Model top_candidate_{index + 1} invalid field=confidence")
+    if not isinstance(payload["object_name_th"], str) or not payload["object_name_th"].strip():
+        raise ModelResponseError("Model object_name_th is empty")
+    if not isinstance(payload["waste_category"], str) or not isinstance(payload["material_subtype"], str):
+        raise ModelResponseError("Model classification fields are invalid")
+    if not all(isinstance(payload[field], str) for field in ("resin_identification_code", "visible_condition")):
+        raise ModelResponseError("Model material evidence fields are invalid")
+    if not isinstance(payload["classification_reason"], str) or not isinstance(payload["visible_object_detected"], bool):
+        raise ModelResponseError("Model visibility fields are invalid")
+    if not isinstance(payload["has_food_scraps"], bool) or not isinstance(payload["has_liquid"], bool):
+        raise ModelResponseError("Model condition fields are invalid")
+    confidence = payload["confidence"]
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        raise ModelResponseError("Model confidence is invalid")
+    return payload
+
+
+def _extract_complete_model_content(result: dict) -> str:
+    if isinstance(result.get("message"), dict):
+        if result.get("done_reason") in {"length", "max_tokens"}:
+            raise ModelResponseError(f"Model response done_reason={result.get('done_reason')}")
+        content = _extract_chat_content(result)
+        _validate_model_content(content)
+        return content
+    choices = result.get("choices")
+    first_choice = choices[0] if isinstance(choices, list) and choices else {}
+    finish_reason = first_choice.get("finish_reason") if isinstance(first_choice, dict) else None
+    if finish_reason == "length":
+        raise ModelResponseError("Model response finish_reason=length")
+    content = _extract_chat_content(result)
+    _validate_model_content(content)
+    return content
+
+
+def classify_image_bytes(
+    image_bytes: bytes,
+    mime_type: str,
+    *,
+    provider: Optional[str] = None,
+) -> dict[str, object]:
+    """Shared image classification path used by /predict and golden evaluation."""
+    selected_provider = (provider or QWEN_PROVIDER).strip().lower()
+    image_data_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    payload = _build_model_request_payload(image_data_url, selected_provider)
+    result = _post_json(payload, selected_provider)
+    try:
+        content = _extract_complete_model_content(result)
+        parsed = _parse_validated_model_response(content)
+        parse_error = None
+    except ModelResponseError as exc:
+        parsed = None
+        parse_error = str(exc)
+        if isinstance(result.get("message"), dict):
+            content = result["message"].get("content", "")
+        else:
+            try:
+                content = result["choices"][0]["message"].get("content", "")
+            except (KeyError, IndexError, TypeError):
+                content = ""
+        if isinstance(content, list):
+            content = "\n".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        if not isinstance(content, str):
+            content = ""
+    message = result.get("message") if isinstance(result.get("message"), dict) else {}
+    choices = result.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    completion_tokens = usage.get("completion_tokens")
+    if completion_tokens is None:
+        completion_tokens = result.get("eval_count")
+    thinking = message.get("thinking", message.get("reasoning_content", ""))
+    return {
+        "raw_prediction": content,
+        "parsed_model_response": parsed,
+        "parse_error": parse_error,
+        "result": result,
+        "finish_reason": result.get("done_reason") or choice.get("finish_reason"),
+        "completion_tokens": completion_tokens,
+        "content_length": len(content),
+        "reasoning_length": len(thinking) if isinstance(thinking, str) else 0,
+        "category": parsed[0] if parsed else None,
+        "confidence": parsed[7] if parsed else None,
+    }
 
 
 def _model_api_error(exc: Exception) -> dict[str, object]:
     """Build a safe, useful error without returning the request or image data."""
-    host = urlparse(API_URL).hostname or "configured model host"
+    active_url = OLLAMA_BASE_URL if QWEN_PROVIDER == "ollama_native" else API_URL
+    host = urlparse(active_url).hostname or "configured model host"
 
     if isinstance(exc, (TimeoutError, socket.timeout)):
         return {
@@ -747,6 +1027,12 @@ def _mapping_api_status(classification_status: str) -> str:
     if classification_status == "unavailable":
         return "missing_mapping"
     return "unknown"
+
+
+def _classification_reason(waste_category: str) -> Optional[str]:
+    if waste_category == "unknown":
+        return "visible_object_unclassified"
+    return None
 
 
 def _no_preparation(reason: str) -> dict[str, object]:
@@ -894,7 +1180,12 @@ def _safe_inference_record(
     top_candidates: Optional[list[dict[str, object]]] = None,
     review_flags: Optional[dict[str, object]] = None,
     has_liquid: Optional[bool] = None,
+    visible_object_detected: Optional[bool] = None,
+    classification_reason: Optional[str] = None,
+    object_name_override_applied: bool = False,
     mapping_reason: Optional[str] = None,
+    mapping_rule_name: Optional[str] = None,
+    confidence_threshold_used: Optional[float] = None,
 ) -> None:
     record = {
         "request_id": request_id,
@@ -926,8 +1217,13 @@ def _safe_inference_record(
         "bin_name": bin_name,
         "mapping_version": mapping_version,
         "classification_status": classification_status,
+        "visible_object_detected": visible_object_detected,
+        "classification_reason": classification_reason,
+        "object_name_override_applied": object_name_override_applied,
         "mapping_fallback": mapping_fallback,
         "mapping_reason": mapping_reason or ("mapping_not_resolved" if status == "api_error" else None),
+        "mapping_rule_name": mapping_rule_name,
+        "confidence_threshold_used": confidence_threshold_used,
         "status": status,
         "model_identifier": MODEL,
         "prompt_version": PROMPT_VERSION,
@@ -1136,6 +1432,82 @@ async def scan_history_image(request: Request, request_id: str) -> Response:
     )
 
 
+def _poc_sources() -> list[tuple[str, Path]]:
+    """Read-only storage roots for the retrospective POC subset."""
+
+    configured = PHASE4_STORAGE.config.root
+    sources = [("configured_storage", configured)]
+    legacy = Path(DEFAULT_STORAGE_ROOT)
+    if legacy.is_dir() and legacy.resolve() != configured.resolve():
+        sources.append(("legacy_storage", legacy))
+    return sources
+
+
+def _poc_dataset() -> dict[str, object]:
+    if MAPPING_CONFIG is None:
+        raise HTTPException(status_code=503, detail={"error": "scan_history_unavailable"})
+    try:
+        return build_poc_dataset(_poc_sources(), MAPPING_CONFIG)
+    except OSError as exc:
+        raise HTTPException(status_code=503, detail={"error": "scan_history_unavailable"}) from exc
+
+
+@app.get("/scan-history/poc")
+async def scan_history_poc(
+    request: Request,
+    limit: int = 20,
+    offset: int = 0,
+    ground_truth_source: Optional[str] = None,
+    waste_category: Optional[str] = None,
+    bin_number: Optional[str] = None,
+) -> dict[str, object]:
+    """Demo-only retrospective subset. Metrics cover human_verified rows only."""
+
+    _require_local_scan_history(request)
+    if limit < 1 or limit > 100 or offset < 0:
+        raise HTTPException(status_code=400, detail={"error": "invalid_limit"})
+    if ground_truth_source is not None and ground_truth_source not in GROUND_TRUTH_SOURCES:
+        raise HTTPException(status_code=400, detail={"error": "invalid_ground_truth_source"})
+    dataset = _poc_dataset()
+    rows = [
+        row for row in dataset["rows"]
+        if (ground_truth_source is None or row["ground_truth_source"] == ground_truth_source)
+        and (waste_category is None or row["historical_prediction"]["waste_category"] == waste_category)
+        and (bin_number is None or str(row["historical_mapping"]["bin_number"]) == bin_number)
+    ]
+    page = rows[offset : offset + limit]
+    summary = {key: value for key, value in dataset["summary"].items() if key != "source_fingerprints"}
+    return {
+        "items": [public_row(row) for row in page],
+        "total": len(rows),
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < len(rows),
+        "summary": summary,
+    }
+
+
+@app.get("/scan-history/poc/images/{request_id}")
+async def scan_history_poc_image(request: Request, request_id: str) -> Response:
+    _require_local_scan_history(request)
+    if not REQUEST_ID_PATTERN.fullmatch(request_id):
+        raise HTTPException(status_code=404, detail={"error": "scan_image_not_found"})
+    dataset = _poc_dataset()
+    row = next((item for item in dataset["rows"] if item["request_id"] == request_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"error": "scan_image_not_found"})
+    try:
+        content = row["_image_path"].read_bytes()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail={"error": "scan_image_not_found"}) from exc
+    media_type = mimetypes.guess_type(str(row["_image_path"]))[0] or "application/octet-stream"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "model": MODEL}
@@ -1258,37 +1630,43 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         )
         return response
 
-    image_data_url = (
-        f"data:{image_metadata.mime_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
-    )
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": PROMPT},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                ],
-            }
-        ],
-        "stream": False,
-        "temperature": 0,
-    }
-
     inference_started_at = time.perf_counter()
-    LOGGER.info("Qwen request started request_id=%s model=%s", request_id, MODEL)
+    finish_reason: Optional[str] = None
+    content_length = 0
+    reasoning_length = 0
+    completion_tokens: Optional[int] = None
+    raw_prediction = ""
+    parsed_model_response: Optional[tuple[str, str, str, str, str, bool, bool, float, object, list[dict[str, object]]]] = None
     try:
-        result = await asyncio.to_thread(_post_json, payload)
-        raw_prediction = _extract_chat_content(result)
+        classification = await asyncio.to_thread(
+            classify_image_bytes, image_bytes, image_metadata.mime_type,
+        )
+        raw_prediction = str(classification["raw_prediction"])
+        parsed_model_response = classification["parsed_model_response"]
+        finish_reason = str(classification["finish_reason"] or "")[:80] or None
+        content_length = int(classification["content_length"])
+        reasoning_length = int(classification["reasoning_length"])
+        completion_tokens = classification["completion_tokens"] if isinstance(classification["completion_tokens"], int) else None
     except Exception as exc:
         detail = _model_api_error(exc)
         response_status = 504 if _is_model_timeout(exc) else 502
+        error_reason = str(exc)[:180] if isinstance(exc, ModelResponseError) else type(exc).__name__
         LOGGER.warning(
-            "Qwen request failed request_id=%s http_status=%s error=%s",
+            "Qwen request failed request_id=%s provider=%s model=%s timeout_seconds=%s completion_tokens=%s elapsed_ms=%s finish_reason=%s content_length=%s reasoning_length=%s category=null confidence=null json_validation_failure_reason=%s error_reason=%s http_status=%s fallback_flag=true fallback_reason=model_request_error metric_response_invalid_total=%s metric_low_confidence_total=%s",
             request_id,
+            QWEN_PROVIDER,
+            MODEL,
+            QWEN_REQUEST_TIMEOUT_SECONDS,
+            completion_tokens,
+            _elapsed_ms(inference_started_at),
+            finish_reason,
+            content_length,
+            reasoning_length,
+            error_reason if isinstance(exc, ModelResponseError) else None,
+            error_reason,
             response_status,
-            detail,
+            FALLBACK_METRICS["response_invalid"],
+            FALLBACK_METRICS["low_confidence"],
         )
         response = _api_error_response(request_id, detail, status_code=response_status)
         _safe_inference_record(
@@ -1313,10 +1691,42 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
             error_type=type(exc).__name__,
         )
         return response
+
+    if parsed_model_response is None:
+        reason = str(classification["parse_error"] or "Model response content is empty or invalid JSON")
+        FALLBACK_METRICS["response_invalid"] += 1
+        LOGGER.warning(
+            "Qwen classification fallback request_id=%s provider=%s model=%s latency_ms=%s finish_reason=%s completion_tokens=%s reasoning_length=%s content_length=%s category=null confidence=null fallback_flag=true fallback_reason=response_empty_or_invalid_json metric_response_invalid_total=%s metric_low_confidence_total=%s reason=%s",
+            request_id, QWEN_PROVIDER, MODEL, _elapsed_ms(inference_started_at),
+            finish_reason, completion_tokens, reasoning_length, content_length,
+            FALLBACK_METRICS["response_invalid"], FALLBACK_METRICS["low_confidence"], reason[:160],
+        )
+        _safe_inference_record(
+            request_id=request_id, timestamp=timestamp, request_started_at=request_started_at,
+            inference_started_at=inference_started_at, stored_image=stored_image,
+            image_save_status=image_save_status, storage_error_type=storage_error_type,
+            object_name_th=None, waste_category=None, confidence=None, has_food_scraps=None,
+            has_liquid=None, bin_id=None, bin_number=None, bin_name=None,
+            mapping_version=MAPPING_CONFIG.mapping_version if MAPPING_CONFIG else None,
+            classification_status="needs_review", mapping_fallback=False,
+            status="needs_review", error_type="ModelResponseError",
+        )
+        return JSONResponse(status_code=200, content={
+            "ok": False, "category": None, "needs_review": True,
+            "reason": "response_empty_or_invalid_json",
+        })
+
+    category = parsed_model_response[0]
+    confidence = parsed_model_response[7]
+    low_confidence = confidence < (MAPPING_CONFIG.confidence_threshold if MAPPING_CONFIG else 0)
+    if low_confidence:
+        FALLBACK_METRICS["low_confidence"] += 1
     LOGGER.info(
-        "Qwen response received request_id=%s elapsed_ms=%s",
-        request_id,
-        _elapsed_ms(inference_started_at),
+        "Qwen request completed request_id=%s provider=%s model=%s latency_ms=%s finish_reason=%s completion_tokens=%s reasoning_length=%s content_length=%s category=%s confidence=%s fallback_flag=%s fallback_reason=%s metric_response_invalid_total=%s metric_low_confidence_total=%s",
+        request_id, QWEN_PROVIDER, MODEL, _elapsed_ms(inference_started_at), finish_reason,
+        completion_tokens, reasoning_length, content_length, category, confidence,
+        low_confidence, "low_confidence" if low_confidence else "none",
+        FALLBACK_METRICS["response_invalid"], FALLBACK_METRICS["low_confidence"],
     )
 
     if _is_no_waste_prediction(raw_prediction):
@@ -1327,6 +1737,7 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
             image_save_status=image_save_status, storage_error_type=storage_error_type,
         )
 
+    assert parsed_model_response is not None
     (
         waste_type,
         item_name_th,
@@ -1338,7 +1749,7 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         confidence,
         raw_category,
         top_candidates,
-    ) = _parse_model_response(raw_prediction)
+    ) = parsed_model_response
     review_flags = _glass_pet_review_flags(
         top_candidates,
         waste_type=waste_type,
@@ -1405,6 +1816,7 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         return response
 
     status = _mapping_api_status(mapping_decision.classification_status)
+    classification_reason = _classification_reason(waste_type)
     preparation = preparation_decision.to_dict()
     fallback_reason = {
         "unknown": "unknown-classification",
@@ -1431,6 +1843,8 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         matchedBinNumber=mapping_decision.bin_number,
         matchedBinName=mapping_decision.bin_name,
         mappingFallback=mapping_decision.mapping_fallback,
+        mappingRuleName=mapping_decision.mapping_rule_name,
+        confidenceThresholdUsed=mapping_decision.confidence_threshold_used,
         locationId=MAPPING_LOCATION_ID,
         mappingVersion=mapping_decision.mapping_version,
     )
@@ -1462,6 +1876,9 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         "waste_category": waste_type,
         "object_name_th": item_name_th,
         "material_subtype": material_subtype,
+        "visible_object_detected": True,
+        "classification_reason": classification_reason,
+        "object_name_override_applied": mapping_decision.object_name_override_applied,
         "resin_identification_code": resin_identification_code,
         "visible_condition": visible_condition,
         "has_food_scraps": has_food_scraps,
@@ -1521,6 +1938,9 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
             "classificationStatus": mapping_decision.classification_status,
             "mappingKeyUsed": mapping_key_used,
             "mappingReason": mapping_decision.mapping_reason,
+            "mappingRuleName": mapping_decision.mapping_rule_name,
+            "confidenceThresholdUsed": mapping_decision.confidence_threshold_used,
+            "objectNameOverrideApplied": mapping_decision.object_name_override_applied,
         },
         "rawCategory": raw_category,
         "normalizedWasteType": waste_type,
@@ -1530,9 +1950,14 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         "mapping_version": mapping_decision.mapping_version,
         "classification_status": mapping_decision.classification_status,
         "classificationStatus": mapping_decision.classification_status,
+        "classification_reason": classification_reason,
+        "visible_object_detected": True,
         "mapping_fallback": mapping_decision.mapping_fallback,
         "mapping_reason": mapping_decision.mapping_reason,
         "mappingReason": mapping_decision.mapping_reason,
+        "mapping_rule_name": mapping_decision.mapping_rule_name,
+        "confidence_threshold_used": mapping_decision.confidence_threshold_used,
+        "object_name_override_applied": mapping_decision.object_name_override_applied,
         "status": status,
     }
     _safe_inference_record(
@@ -1561,6 +1986,11 @@ async def predict(request: Request, file: UploadFile = File(...)) -> object:
         error_type=None,
         top_candidates=top_candidates,
         review_flags=review_flags,
+        visible_object_detected=True,
+        classification_reason=classification_reason,
+        object_name_override_applied=mapping_decision.object_name_override_applied,
         mapping_reason=mapping_decision.mapping_reason,
+        mapping_rule_name=mapping_decision.mapping_rule_name,
+        confidence_threshold_used=mapping_decision.confidence_threshold_used,
     )
     return response
