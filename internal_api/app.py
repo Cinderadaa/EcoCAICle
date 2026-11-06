@@ -99,8 +99,8 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rs
 
 
 def _model_from_environment(value: object = None) -> str:
-    configured = os.environ.get("QWEN_MODEL", "qwen3-vl:4b") if value is None else value
-    return str(configured).strip() or "qwen3-vl:4b"
+    configured = os.environ.get("QWEN_MODEL", "qwen3.8:27b") if value is None else value
+    return str(configured).strip() or "qwen3.8:27b"
 
 
 MODEL = _model_from_environment()

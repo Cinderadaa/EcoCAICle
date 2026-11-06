@@ -2,16 +2,23 @@
 
 ## Scope and live state
 
-This comparison is preparatory only. No production environment value, mapping
-configuration, or running service was changed.
+This comparison is preparatory and records the earlier state. No running service
+was changed or restarted during that comparison.
+
+**Configuration update (2026-11-06):** after the separate offline error analysis,
+`QWEN_MODEL` was set to `qwen3.8:27b` in the root and backend local `.env` files;
+the application and Docker defaults were also changed to `qwen3.8:27b`. This
+prepares the next process start/image build. The running process was not restarted,
+so its active model was not verified or changed by these file edits.
 
 The successful historical request `3a00534d-75be-4611-afb2-80f63e6b9a03`
 records `qwen3-vl:4b`, prompt version `qwen-waste-classification-v2`, an
-`ewaste` classification at confidence `0.9`, and Bin 7. The current backend
-environment file (`internal_api/.env`) selects `qwen3.8:27b`; the working tree
-prompt version is `qwen-waste-classification-v9`. The workspace root `.env`
-also contains `QWEN_MODEL=qwen3-vl:4b`, so deployment/runtime environment
-precedence should be checked before changing any live process.
+`ewaste` classification at confidence `0.9`, and Bin 7. At the time of the
+comparison, the backend and root environment files had different model tags;
+the local model configuration update above now selects `qwen3.8:27b` in both
+files. The working tree prompt version remains
+`qwen-waste-classification-v9`. Deployment/runtime environment precedence still
+needs to be checked before claiming the running process uses the updated tag.
 
 ## Git provenance and restore boundary
 

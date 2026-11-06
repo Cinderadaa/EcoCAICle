@@ -103,3 +103,6 @@ internal_api/.venv/
 .env
 .env.local
 Frontend/.env.local
+
+# Local derived error-analysis artifacts
+/derived/error_analysis_2026-11-06/

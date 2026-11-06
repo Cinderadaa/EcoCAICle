@@ -9,7 +9,7 @@ deploy, or change any running service.
 
 The backend keeps `QWEN_PROVIDER=litellm` as its default and supports
 `QWEN_PROVIDER=ollama_native` as an opt-in route to `OLLAMA_BASE_URL`.
-`QWEN_MODEL=qwen3-vl:4b` and `QWEN_TIMEOUT_SECONDS=60` are the image defaults.
+`QWEN_MODEL=qwen3.8:27b` and `QWEN_TIMEOUT_SECONDS=60` are the image defaults.
 The LiteLLM request has no configured `max_tokens` cap; the native Ollama
 request uses `think=false`, JSON schema output, and `num_predict=300`. Model
 reasoning text is never used as classification data.
@@ -24,7 +24,7 @@ Set the backend runtime variables explicitly when enabling native Ollama;
 production remains on the LiteLLM default until the golden evaluation passes:
 
 ```text
-QWEN_MODEL=qwen3-vl:4b
+QWEN_MODEL=qwen3.8:27b
 QWEN_PROVIDER=ollama_native
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 QWEN_TIMEOUT_SECONDS=60
