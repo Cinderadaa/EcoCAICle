@@ -61,7 +61,7 @@
     }
   ],
   "classification_policy": {
-    "confidence_threshold": 0.7,
+    "confidence_threshold": 0.69,
     "unknown_fallback": {
       "enabled": true,
       "applies_to": [

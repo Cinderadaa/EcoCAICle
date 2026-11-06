@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -67,6 +68,72 @@ class PetPromptClassificationTest(unittest.TestCase):
             has_liquid=has_liquid,
         )
         return parsed, decision
+
+    def load_reviewed_beverage_bottle_fixture(self):
+        fixture_path = ROOT / "internal_api" / "tests" / "fixtures" / (
+            "09f5ffc8-9339-4d50-99d7-d7909ce1a0a2.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        image_path = ROOT / fixture["image_path"]
+        self.assertTrue(fixture["reviewer_confirmed"])
+        self.assertTrue(image_path.is_file())
+        self.assertTrue(image_path.read_bytes().startswith(b"\xff\xd8"))
+        return fixture
+
+    def test_reviewed_request_fixture_classifies_pet_beverage_bottle_to_bin_2(self):
+        fixture = self.load_reviewed_beverage_bottle_fixture()
+        expected = fixture["expected"]
+        self.assertIn(
+            'set waste_category="pet_bottle" and material_subtype="pet_bottle"',
+            api.PROMPT,
+        )
+        self.assertIn(
+            "Reserve plastic/rigid_plastic for rigid plastic containers that are not beverage bottles",
+            api.PROMPT,
+        )
+
+        parsed, decision = self.parse_and_map(classification_response(
+            expected["object_name_th"],
+            expected["waste_category"],
+            expected["material_subtype"],
+            condition=expected["visible_condition"],
+            confidence=expected["confidence"],
+        ))
+        self.assertEqual(parsed[0], "pet_bottle")
+        self.assertEqual(parsed[2], "pet_bottle")
+        self.assertEqual(decision.bin_number, expected["bin_number"])
+        self.assertFalse(decision.mapping_fallback)
+
+    def test_historical_rigid_plastic_response_is_not_promoted_by_bottle_name(self):
+        fixture = self.load_reviewed_beverage_bottle_fixture()
+        old = fixture["prior_model_output"]
+        parsed, decision = self.parse_and_map(classification_response(
+            old["object_name_th"], old["waste_category"], old["material_subtype"],
+            condition=old["visible_condition"], confidence=old["confidence"],
+        ))
+        self.assertEqual(parsed[0], "plastic")
+        self.assertEqual(parsed[2], "rigid_plastic")
+        self.assertEqual(decision.bin_number, old["bin_number"])
+
+    def test_pet_beverage_bottle_contaminated_or_unknown_condition_stays_in_bin_1(self):
+        for condition in ("food_or_liquid_contaminated", "unknown"):
+            with self.subTest(condition=condition):
+                parsed, decision = self.parse_and_map(classification_response(
+                    "ขวดพลาสติกแข็งบรรจุเครื่องดื่ม", "pet_bottle", "pet_bottle",
+                    condition=condition, confidence=0.7,
+                ))
+                self.assertEqual(parsed[0:3:2], ("pet_bottle", "pet_bottle"))
+                self.assertEqual(decision.bin_number, 1)
+                self.assertTrue(decision.mapping_fallback)
+
+    def test_non_beverage_rigid_plastic_container_remains_bin_8(self):
+        parsed, decision = self.parse_and_map(classification_response(
+            "ภาชนะพลาสติกแข็ง", "plastic", "rigid_plastic",
+            condition="clean_dry", confidence=0.7,
+        ))
+        self.assertEqual(parsed[0], "plastic")
+        self.assertEqual(parsed[2], "rigid_plastic")
+        self.assertEqual(decision.bin_number, 8)
 
     def test_clear_pet_beverage_bottle_maps_to_bin_2(self):
         parsed, decision = self.parse_and_map(classification_response(

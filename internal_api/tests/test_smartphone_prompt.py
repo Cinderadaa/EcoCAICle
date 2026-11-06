@@ -36,7 +36,7 @@ class SmartphonePromptTest(unittest.TestCase):
         cls.version_expression = constants["PROMPT_VERSION"]
 
     def test_prompt_version_is_bumped(self):
-        self.assertIn("qwen-waste-classification-v11", self.version_expression)
+        self.assertIn("qwen-waste-classification-v12", self.version_expression)
 
     @unittest.skipUnless(REAR_PHONE_IMAGE.is_file(), "stored request image is not available")
     def test_named_rear_facing_black_case_phone_image_is_available(self):
